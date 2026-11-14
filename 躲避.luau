@@ -4,10 +4,258 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Lighting = game:GetService("Lighting")
 local TweenService = game:GetService("TweenService")
 local VirtualInputManager = game:GetService("VirtualInputManager")
+local UserInputService = game:GetService("UserInputService")
 local player = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
+local autoJumpToggleRef = nil
 
-local WindUI = loadstring(game:HttpGet("https://raw.githubusercontent.com/Yisan886/Aero/refs/heads/main/ui.lua.txt"))()
+local function fetchWithRetry(url)
+    for _ = 1, 4 do
+        local ok, body = pcall(function()
+            return game:HttpGet(url)
+        end)
+        if ok and type(body) == "string" and #body > 0 then
+            return body
+        end
+        task.wait(0.2)
+    end
+    return nil
+end
+
+local function compileLuaSource(source)
+    if type(source) ~= "string" or #source == 0 then
+        return nil
+    end
+    local chunk = loadstring(source)
+    if not chunk then
+        return nil
+    end
+    local ok, result = pcall(chunk)
+    if ok then
+        return result
+    end
+    return nil
+end
+
+local function makeIconModule(lucideIcons)
+    local module = {
+        IconsType = "lucide",
+        New = nil,
+        IconThemeTag = nil,
+        Icons = {
+            lucide = lucideIcons,
+        },
+    }
+
+    local function parseIconString(iconString)
+        if type(iconString) == "string" then
+            local splitIndex = string.find(iconString, ":")
+            if splitIndex then
+                return string.sub(iconString, 1, splitIndex - 1), string.sub(iconString, splitIndex + 1)
+            end
+        end
+        return nil, iconString
+    end
+
+    local function defaultFormatIcon(image)
+        return {
+            image,
+            { ImageRectSize = Vector2.new(0, 0), ImageRectPosition = Vector2.new(0, 0) },
+        }
+    end
+
+    function module.SetIconsType(iconType)
+        module.IconsType = iconType
+    end
+
+    function module.Init(New, IconThemeTag)
+        module.New = New
+        module.IconThemeTag = IconThemeTag
+        return module
+    end
+
+    function module.AddIcons(packName, iconsData)
+        if type(packName) ~= "string" or type(iconsData) ~= "table" then
+            return
+        end
+        local pack = module.Icons[packName]
+        if type(pack) ~= "table" then
+            pack = {}
+            module.Icons[packName] = pack
+        end
+        for iconName, iconValue in pairs(iconsData) do
+            if type(iconValue) == "number" then
+                iconValue = "rbxassetid://" .. tostring(iconValue)
+            end
+            pack[iconName] = iconValue
+        end
+    end
+
+    function module.Icon(icon, iconType, defaultFormat)
+        defaultFormat = defaultFormat ~= false
+        local parsedType, parsedName = parseIconString(icon)
+        local targetType = parsedType or iconType or module.IconsType
+        local pack = module.Icons[targetType]
+        if type(pack) == "table" and parsedName ~= nil then
+            local entry = pack[parsedName]
+            if type(entry) == "string" then
+                if string.find(entry, "rbxassetid://", 1, true) then
+                    if defaultFormat then
+                        return defaultFormatIcon(entry)
+                    end
+                    return entry
+                end
+                return defaultFormatIcon(entry)
+            elseif type(entry) == "table" and entry.Image then
+                return {
+                    entry.Image,
+                    {
+                        ImageRectSize = entry.ImageRectSize or Vector2.new(0, 0),
+                        ImageRectPosition = entry.ImageRectPosition or Vector2.new(0, 0),
+                        Parts = entry.Parts,
+                    },
+                }
+            end
+        end
+        return defaultFormatIcon("")
+    end
+
+    function module.GetIcon(icon, iconType)
+        return module.Icon(icon, iconType, false)
+    end
+
+    function module.Icon2(icon, iconType)
+        return module.Icon(icon, iconType, true)
+    end
+
+    function module.Image(config)
+        local colors = config and config.Colors or { Color3.new(1, 1, 1), Color3.new(1, 1, 1) }
+        local size = config and config.Size or UDim2.new(0, 24, 0, 24)
+        local icon = config and config.Icon or nil
+        local iconType = config and config.Type or nil
+        local iconLabel = module.Icon2(icon, iconType)
+        local image = ""
+        local rectSize = nil
+        local rectOffset = nil
+        if type(iconLabel) == "string" then
+            image = iconLabel
+        elseif type(iconLabel) == "table" then
+            image = iconLabel[1] or ""
+            local info = iconLabel[2]
+            if type(info) == "table" then
+                rectSize = info.ImageRectSize
+                rectOffset = info.ImageRectPosition
+            end
+        end
+        local function resolveColor(color)
+            if typeof(color) == "Color3" then
+                return color
+            end
+            return Color3.new(1, 1, 1)
+        end
+        local function createLabel(props)
+            if type(module.New) == "function" then
+                local ok, frame = pcall(module.New, "ImageLabel", props)
+                if ok and frame then
+                    return frame
+                end
+            end
+            local frame = Instance.new("ImageLabel")
+            for key, value in pairs(props) do
+                if key ~= "ThemeTag" then
+                    pcall(function()
+                        frame[key] = value
+                    end)
+                end
+            end
+            return frame
+        end
+        local props = {
+            Size = size,
+            BackgroundTransparency = 1,
+            ImageColor3 = resolveColor(colors[1]),
+            Image = image or "",
+        }
+        if rectSize then
+            props.ImageRectSize = rectSize
+        end
+        if rectOffset then
+            props.ImageRectOffset = rectOffset
+        end
+        return { IconFrame = createLabel(props) }
+    end
+
+    return module
+end
+
+local lucideSource = fetchWithRetry("https://raw.githubusercontent.com/Footagesus/Icons/refs/heads/main/lucide/dist/Icons.lua")
+local lucideData = compileLuaSource(lucideSource)
+if type(lucideData) ~= "table" then
+    lucideData = {}
+end
+
+local AeroIconModule = makeIconModule(lucideData)
+__AeroIconsModule = AeroIconModule
+do
+    local genv = nil
+    if type(getgenv) == "function" then
+        local ok, env = pcall(getgenv)
+        if ok and type(env) == "table" then
+            genv = env
+        end
+    end
+    if genv then
+        genv.__AeroIconsModule = AeroIconModule
+    end
+end
+
+local uiSource = fetchWithRetry("https://raw.githubusercontent.com/Yisan886/Aero/refs/heads/main/ui.lua.txt")
+if not uiSource then
+    error("[躲避] UI 库下载失败，请检查执行器的 HTTP 是否可用")
+end
+
+local iconsLoaderPattern = 'local l=loadstring%(%s*game%.HttpGetAsync%s+and%s+game:HttpGetAsync%(%s*j%s*%)%s*or%s+h:GetAsync%(%s*j%s*%)%s*%)%s*%(%)'
+local iconsLoaderReplacement = "local l=(getgenv and getgenv().__AeroIconsModule) or __AeroIconsModule"
+local patchedSource, replacementCount = string.gsub(uiSource, iconsLoaderPattern, iconsLoaderReplacement, 1)
+local iconsPatched = replacementCount > 0
+if iconsPatched then
+    uiSource = patchedSource
+else
+    local urlPos = string.find(uiSource, "Icons/main/Main-v2.lua", 1, true)
+    if urlPos then
+        local loadPos = string.find(uiSource, "loadstring(", urlPos, true)
+        if loadPos then
+            local expressionEnd = string.find(uiSource, ")()", loadPos, true)
+            if expressionEnd then
+                local lastLocalPos = nil
+                local searchStart = 1
+                while true do
+                    local found = string.find(uiSource, "local l=", searchStart, true)
+                    if not found or found > loadPos then
+                        break
+                    end
+                    lastLocalPos = found
+                    searchStart = found + 1
+                end
+                if lastLocalPos then
+                    uiSource = string.sub(uiSource, 1, lastLocalPos - 1)
+                        .. iconsLoaderReplacement
+                        .. string.sub(uiSource, expressionEnd + 3)
+                    iconsPatched = true
+                end
+            end
+        end
+    end
+end
+if not iconsPatched then
+    warn("[躲避] UI 图标加载段未匹配，已回退到原版加载方式")
+end
+
+local uiChunk = loadstring(uiSource)
+if not uiChunk then
+    error("[躲避] UI 库编译失败")
+end
+local WindUI = uiChunk()
 
 WindUI:AddTheme({
     Name = "Fallen Aero",
@@ -24,7 +272,7 @@ local Window = WindUI:CreateWindow({
     Title = "Aero      ",
     Folder = "Aero",
     SideBarWidth = 180,
-    Background = "https://chaton-images.s3.us-east-2.amazonaws.com/alHcHts2JjSlmMRKjQeDXFipKS5LjNhrKrkN8TxbH7HgPmXA1QbuEYZh3Hwnb9F5_1536x1024x1945789.png", -- 背景视频
+    Background = "https://chaton-images.s3.us-east-2.amazonaws.com/alHcHts2JjSlmMRKjQeDXFipKS5LjNhrKrkN8TxbH7HgPmXA1QbuEYZh3Hwnb9F5_1536x1024x1945789.png",
     BackgroundImageTransparency = 0.35,
     OpenButton = {
         Title = "打开脚本",
@@ -57,7 +305,6 @@ Window:Tag({
     Color = Color3.fromHex("FFD700"),
     Radius = 2,
 })
-
 
 local COLOR_SCHEMES = {
     ["Fallen Purple"] = {
@@ -131,8 +378,12 @@ local function startBorderAnimation(window, speed)
     local glowEffect = rainbowStroke:FindFirstChild("GlowEffect")
     if not glowEffect then return nil end
 
+    local lastUpdate = 0
     return RunService.Heartbeat:Connect(function()
         if not rainbowStroke or rainbowStroke.Parent == nil then return end
+        local now = os.clock()
+        if now - lastUpdate < 0.05 then return end
+        lastUpdate = now
         glowEffect.Rotation = (tick() * speed * 10) % 360
     end)
 end
@@ -154,7 +405,7 @@ task.spawn(function()
         task.wait(0.1)
         local mainFrame = Window.UIElements and Window.UIElements.Main
         local isOpen = mainFrame and mainFrame.Visible or false
-        
+
         if isOpen ~= wasOpen then
             wasOpen = isOpen
             TweenService:Create(blur, TweenInfo.new(0.3), {
@@ -169,7 +420,6 @@ getRoot = function(model)
     return model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
 end
 
--- Evade 当前版本把玩家模型放在 workspace.Game.Players，旧版本在 workspace.Players
 local function getGamePlayersContainer()
     local gameFolder = workspace:FindFirstChild("Game")
     local nested = gameFolder and gameFolder:FindFirstChild("Players")
@@ -179,7 +429,6 @@ local function getGamePlayersContainer()
     return workspace:FindFirstChild("Players")
 end
 
--- 倒地检测：当前版本看角色的 "Downed" 属性，旧版本退回 Humanoid 血量
 local function isPlayerDowned(model)
     if not model or not model.Parent then
         return false
@@ -193,6 +442,9 @@ local function isPlayerDowned(model)
     local humanoid = model:FindFirstChildOfClass("Humanoid")
     return humanoid ~= nil and humanoid.Health <= 0
 end
+
+local CharacterService = nil
+local getLocalCharacterObject
 
 local ESP = {
     Players = false,
@@ -229,30 +481,124 @@ local function getDistance(model)
     return nil
 end
 
-local function drawTarget(t, model, name, color, downed, hp, dist)
-    local root = getRoot(model)
-    local ok, extents = pcall(function() return model:GetExtentsSize() end)
-    if not root or not ok then
+local function getMonsterContainers()
+    local containers = {}
+    local seen = {}
+    local function push(container)
+        if container and not seen[container] then
+            seen[container] = true
+            containers[#containers + 1] = container
+        end
+    end
+    local gameFolder = workspace:FindFirstChild("Game")
+    if gameFolder then
+        push(gameFolder:FindFirstChild("Players"))
+        push(gameFolder:FindFirstChild("Rigs"))
+        push(gameFolder:FindFirstChild("Nextbots"))
+        push(gameFolder:FindFirstChild("Monsters"))
+        push(gameFolder:FindFirstChild("NPCs"))
+        for _, child in ipairs(gameFolder:GetChildren()) do
+            if child:IsA("Folder") or child:IsA("Model") then
+                local lower = string.lower(child.Name)
+                if string.find(lower, "nextbot", 1, true)
+                    or string.find(lower, "monster", 1, true)
+                    or string.find(lower, "npc", 1, true) then
+                    push(child)
+                end
+            end
+        end
+    end
+    push(workspace:FindFirstChild("Players"))
+    push(workspace:FindFirstChild("Rigs"))
+    push(workspace:FindFirstChild("Nextbots"))
+    push(workspace:FindFirstChild("Monsters"))
+    return containers
+end
+
+local function isMonsterModel(model)
+    local okAi, ai = pcall(function()
+        return model:GetAttribute("AI")
+    end)
+    if okAi and ai ~= nil and ai ~= false then
+        return true
+    end
+    local okTeam, team = pcall(function()
+        return model:GetAttribute("Team")
+    end)
+    if okTeam and team == "Nextbot" then
+        return true
+    end
+    return false
+end
+
+local monsterScanCache = {}
+local lastMonsterScan = 0
+
+local function refreshMonsterScan()
+    local now = os.clock()
+    if now - lastMonsterScan < 2 then
+        return
+    end
+    lastMonsterScan = now
+    monsterScanCache = {}
+    pcall(function()
+        for _, descendant in ipairs(workspace:GetDescendants()) do
+            if descendant:IsA("Model") and isMonsterModel(descendant) then
+                monsterScanCache[#monsterScanCache + 1] = descendant
+                if #monsterScanCache >= 100 then
+                    break
+                end
+            end
+        end
+    end)
+end
+
+local function getModelPart(model)
+    local root = model:FindFirstChild("HumanoidRootPart")
+    if root then
+        return root
+    end
+    local primary = model.PrimaryPart
+    if primary then
+        return primary
+    end
+    return model:FindFirstChildWhichIsA("BasePart", true)
+end
+
+local function drawTarget(t, cam, model, name, color, downed, hp, dist)
+    if not cam then
         t.box.Visible = false
         t.text.Visible = false
         return
     end
+    local okBox, boxCFrame, boxSize = pcall(function()
+        return model:GetBoundingBox()
+    end)
+    if not okBox or not boxCFrame or not boxSize then
+        local part = getModelPart(model)
+        if not part then
+            t.box.Visible = false
+            t.text.Visible = false
+            return
+        end
+        boxCFrame = part.CFrame
+        boxSize = part.Size
+    end
 
-    local w = math.max(extents.X / 2, 1.5)
-    local hh = math.max(extents.Y / 2, 2)
-    local cf = root.CFrame
+    local halfX = math.max(boxSize.X / 2, 1)
+    local halfY = math.max(boxSize.Y / 2, 1)
     local corners = {
-        cf:PointToWorldSpace(Vector3.new(-w, hh, 0)),
-        cf:PointToWorldSpace(Vector3.new(w, hh, 0)),
-        cf:PointToWorldSpace(Vector3.new(-w, -hh, 0)),
-        cf:PointToWorldSpace(Vector3.new(w, -hh, 0)),
+        boxCFrame:PointToWorldSpace(Vector3.new(-halfX, halfY, 0)),
+        boxCFrame:PointToWorldSpace(Vector3.new(halfX, halfY, 0)),
+        boxCFrame:PointToWorldSpace(Vector3.new(-halfX, -halfY, 0)),
+        boxCFrame:PointToWorldSpace(Vector3.new(halfX, -halfY, 0)),
     }
 
     local minX, maxX = math.huge, -math.huge
     local minY, maxY = math.huge, -math.huge
     local onScreen = false
     for _, pos in ipairs(corners) do
-        local v, vis = Camera:WorldToViewportPoint(pos)
+        local v, vis = cam:WorldToViewportPoint(pos)
         if vis then onScreen = true end
         if v.X < minX then minX = v.X end
         if v.X > maxX then maxX = v.X end
@@ -285,24 +631,91 @@ end
 
 local function collectTargets()
     local list = {}
-    local container = getGamePlayersContainer()
-    if not container then return list end
+    local seen = {}
+    local function add(model, kind)
+        if not model or seen[model] then
+            return
+        end
+        seen[model] = true
+        list[#list + 1] = { model = model, kind = kind }
+    end
 
-    for _, model in ipairs(container:GetChildren()) do
-        if model:IsA("Model") then
-            local team = model:GetAttribute("Team")
-            if team == "Nextbot" and ESP.Monsters then
-                list[#list + 1] = { model = model, kind = "monster" }
-            elseif team == "PlayerTeam" and (model ~= player.Character or ESP.Self) and ESP.Players then
-                list[#list + 1] = { model = model, kind = "player" }
+    for _, container in ipairs(getMonsterContainers()) do
+        for _, model in ipairs(container:GetChildren()) do
+            if model:IsA("Model") and model.Parent then
+                if isMonsterModel(model) then
+                    if ESP.Monsters then
+                        add(model, "monster")
+                    end
+                elseif ESP.Players then
+                    local team = model:GetAttribute("Team")
+                    if team == "PlayerTeam" and (model ~= player.Character or ESP.Self) then
+                        add(model, "player")
+                    end
+                end
+            end
+        end
+    end
+
+    if ESP.Monsters then
+        refreshMonsterScan()
+        for _, model in ipairs(monsterScanCache) do
+            if model.Parent then
+                add(model, "monster")
+            end
+        end
+    end
+
+    getLocalCharacterObject()
+    if CharacterService then
+        local ok, characters = pcall(CharacterService.GetCharacters, CharacterService)
+        if ok and type(characters) == "table" then
+            for _, characterObject in ipairs(characters) do
+                local model = nil
+                pcall(function()
+                    model = characterObject.Model
+                end)
+                if model and model.Parent and model:IsA("Model") then
+                    if isMonsterModel(model) then
+                        if ESP.Monsters then
+                            add(model, "monster")
+                        end
+                    elseif ESP.Players then
+                        local team = model:GetAttribute("Team")
+                        if team == "PlayerTeam" and (model ~= player.Character or ESP.Self) then
+                            add(model, "player")
+                        end
+                    end
+                end
             end
         end
     end
     return list
 end
 
+local espActive = false
+
+local function clearDrawPool()
+    for key, t in pairs(drawPool) do
+        pcall(function() t.box:Remove() end)
+        pcall(function() t.text:Remove() end)
+        drawPool[key] = nil
+    end
+    aliveKeys = {}
+    espActive = false
+end
+
 local function update()
     if not D then return end
+
+    if not ESP.Players and not ESP.Monsters then
+        if espActive or next(drawPool) ~= nil then
+            clearDrawPool()
+        end
+        return
+    end
+    espActive = true
+    local cam = workspace.CurrentCamera
     local targets = collectTargets()
     aliveKeys = {}
 
@@ -320,9 +733,16 @@ local function update()
             local downed = isPlayerDowned(model)
             local disp = humanoid and humanoid.DisplayName or model.Name
             local name = (disp and disp ~= "" and disp ~= "(无)") and disp or model.Name
-            drawTarget(t, model, name, downed and Color3.fromRGB(255, 180, 0) or Color3.fromRGB(0, 255, 128), downed, hp, dist)
+            drawTarget(t, cam, model, name, downed and Color3.fromRGB(255, 180, 0) or Color3.fromRGB(0, 255, 128), downed, hp, dist)
         else
-            drawTarget(t, model, model.Name, Color3.fromRGB(255, 40, 40), false, nil, dist)
+            local aiName = nil
+            pcall(function()
+                local ai = model:GetAttribute("AI")
+                if type(ai) == "string" and ai ~= "" then
+                    aiName = ai
+                end
+            end)
+            drawTarget(t, cam, model, aiName or model.Name, Color3.fromRGB(255, 40, 40), false, hp, dist)
         end
     end
 
@@ -343,20 +763,25 @@ end
 task.spawn(function()
     while true do
         pcall(update)
-        task.wait(0.03)
+        task.wait(0.05)
     end
 end)
 
--- ==================== 移动 / 跳跃 ====================
 local currentSpeed = 2000
-local jumpValue = 7
+local jumpLevel = 1
 local autoJumpEnabled = false
 
--- 滑块 7 ≈ 默认跳跃高度（studs）；把“高度”换算成 Humanoid 的起跳速度
-local DEFAULT_JUMP = 7.2
-local GRAVITY = 196.2
+local JUMP_STEP = 0.25
+local jumpBaseHeight = nil
+local jumpBaseApplied = false
 
--- Evade 自定义移动属性表的字段签名（getgc 兜底时用）
+local function getJumpMultiplier()
+    if jumpLevel <= 0 then
+        return 0
+    end
+    return 1 + (jumpLevel - 1) * JUMP_STEP
+end
+
 local MOVE_STAT_KEYS = {
     "Friction",
     "AirStrafeAcceleration",
@@ -375,24 +800,11 @@ local MOVE_STAT_KEYS = {
 
 local BaseStatsModule = nil
 local MoveFunctions = nil
-local CharacterService = nil
 local moveFunctionsHooked = false
-local jumpBaseHeight = setmetatable({}, { __mode = "k" })
 local moveStatsBase = setmetatable({}, { __mode = "k" })
 local cachedMoveStats = {}
-local lastMoveStatsScan = 0
-local unpackResults = table.unpack or unpack
-
-local function packResults(...)
-    return { n = select("#", ...), ... }
-end
-
-local function jumpPowerForHeight(height)
-    if type(height) ~= "number" or height <= 0 then
-        return 0
-    end
-    return math.sqrt(2 * GRAVITY * height)
-end
+local nextMoveStatsScan = os.clock() + 30
+local moveStatsScanBackoff = 30
 
 local function safeRequire(instance)
     if not instance then
@@ -413,7 +825,6 @@ local function findMovementInstance()
     return clientFolder and clientFolder:FindFirstChild("Movement")
 end
 
--- 静态默认属性（兼容旧版本路径）
 local function findBaseStats()
     local movement = findMovementInstance()
     if not movement then
@@ -436,7 +847,6 @@ local function findBaseStats()
     return nil
 end
 
--- 找到 Movement.MoveFunction.Functions（各移动状态的函数表）
 local function findMoveFunctions()
     local movement = findMovementInstance()
     if not movement then
@@ -470,11 +880,16 @@ local function findMoveFunctions()
     return nil
 end
 
--- 本地角色对象（带 MoveStats / AttemptJump / DataRegistry）
 local lastCharacterServiceAttempt = 0
-local function getLocalCharacterObject()
+local cachedCharacterObject = nil
+local cachedCharacterObjectAt = 0
+
+getLocalCharacterObject = function()
+    local now = os.clock()
+    if cachedCharacterObject and now - cachedCharacterObjectAt < 1 then
+        return cachedCharacterObject
+    end
     if not CharacterService then
-        local now = os.clock()
         if CharacterService == nil or now - lastCharacterServiceAttempt >= 5 then
             lastCharacterServiceAttempt = now
             local services = ReplicatedStorage:FindFirstChild("Services")
@@ -486,12 +901,13 @@ local function getLocalCharacterObject()
     if not CharacterService then
         return nil
     end
-    local ok, characterObject = pcall(function()
-        return CharacterService:GetLocalCharacter()
-    end)
-    if ok then
+    local ok, characterObject = pcall(CharacterService.GetLocalCharacter, CharacterService)
+    if ok and characterObject then
+        cachedCharacterObject = characterObject
+        cachedCharacterObjectAt = now
         return characterObject
     end
+    cachedCharacterObject = nil
     return nil
 end
 
@@ -507,149 +923,180 @@ local function isMoveStatsTable(tbl)
     return true
 end
 
-local function collectMoveStatsTables()
-    local result = {}
+local function isUsableMoveStats(tbl)
+    return type(tbl) == "table" and type(rawget(tbl, "Speed")) == "number"
+end
+
+local function getMoveStatsFromCharacter()
     local characterObject = getLocalCharacterObject()
-    if characterObject then
-        local ok, stats = pcall(function()
-            return characterObject.MoveStats
-        end)
-        if ok and isMoveStatsTable(stats) then
-            result[#result + 1] = stats
-        end
+    if not characterObject then
+        return nil
     end
-    if #result > 0 then
-        return result
+    local movement = characterObject.Movement
+    if not movement then
+        return nil
+    end
+    local moveStatsObject = movement.MoveStats
+    if not moveStatsObject then
+        return nil
+    end
+    local ok, stats = pcall(function()
+        return moveStatsObject:GetMoveStats()
+    end)
+    if ok and isUsableMoveStats(stats) then
+        return stats
+    end
+    return nil
+end
+
+local function collectMoveStatsTables()
+    local characterStats = getMoveStatsFromCharacter()
+    if characterStats then
+        return { characterStats }
     end
 
     local now = os.clock()
-    if now - lastMoveStatsScan >= 2 then
-        lastMoveStatsScan = now
-        cachedMoveStats = {}
-        if type(getgc) == "function" then
+    if now < nextMoveStatsScan or not player.Character then
+        return cachedMoveStats
+    end
+    cachedMoveStats = {}
+    if type(getgc) == "function" then
+        pcall(function()
+            for _, obj in ipairs(getgc(true)) do
+                if isMoveStatsTable(obj) then
+                    cachedMoveStats[#cachedMoveStats + 1] = obj
+                end
+            end
+        end)
+    end
+    if #cachedMoveStats > 0 then
+        nextMoveStatsScan = now + 30
+    else
+        nextMoveStatsScan = now + moveStatsScanBackoff
+        moveStatsScanBackoff = math.min(moveStatsScanBackoff * 2, 120)
+    end
+    return cachedMoveStats
+end
+
+local function setStatIfChanged(stats, key, value)
+    if rawget(stats, key) ~= value then
+        stats[key] = value
+        return true
+    end
+    return false
+end
+
+local DEFAULT_BASE_SPEED = 1500
+
+local function getDefaultMoveStatsBase()
+    if BaseStatsModule then
+        local speed = tonumber(BaseStatsModule.Speed)
+        if speed and speed > 0 then
+            return {
+                Speed = speed,
+                RunAccel = tonumber(BaseStatsModule.RunAccel) or 1,
+                RunDeaccel = tonumber(BaseStatsModule.RunDeaccel) or 700,
+                SprintAcceleration = tonumber(BaseStatsModule.SprintAcceleration) or 1,
+            }
+        end
+    end
+    return nil
+end
+
+local function applyMoveStats()
+    for _, stats in ipairs(collectMoveStatsTables()) do
+        if isUsableMoveStats(stats) then
             pcall(function()
-                for _, obj in ipairs(getgc(true)) do
-                    if isMoveStatsTable(obj) then
-                        cachedMoveStats[#cachedMoveStats + 1] = obj
+                local liveBaseSpeed = rawget(stats, "BaseSpeed")
+                if type(liveBaseSpeed) == "number" and liveBaseSpeed ~= DEFAULT_BASE_SPEED then
+                    stats.BaseSpeed = DEFAULT_BASE_SPEED
+                end
+                local base = getDefaultMoveStatsBase()
+                if base == nil then
+                    base = moveStatsBase[stats]
+                    if base == nil then
+                        local liveSpeed = tonumber(rawget(stats, "Speed")) or 0
+                        local chosenSpeed = DEFAULT_BASE_SPEED
+                        if liveSpeed > 0 and liveSpeed ~= currentSpeed then
+                            chosenSpeed = liveSpeed
+                        end
+                        base = {
+                            Speed = chosenSpeed,
+                            RunAccel = tonumber(rawget(stats, "RunAccel")) or 0,
+                            RunDeaccel = tonumber(rawget(stats, "RunDeaccel")) or 0,
+                            SprintAcceleration = tonumber(rawget(stats, "SprintAcceleration")) or 0,
+                        }
+                        moveStatsBase[stats] = base
+                    end
+                end
+                if base and base.Speed > 0 and currentSpeed > 0 then
+                    local factor = currentSpeed / base.Speed
+                    setStatIfChanged(stats, "Speed", currentSpeed)
+                    if base.RunAccel > 0 then
+                        setStatIfChanged(stats, "RunAccel", base.RunAccel * factor)
+                    end
+                    if base.RunDeaccel > 0 then
+                        setStatIfChanged(stats, "RunDeaccel", base.RunDeaccel * factor)
+                    end
+                    if base.SprintAcceleration > 0 then
+                        setStatIfChanged(stats, "SprintAcceleration", base.SprintAcceleration * factor)
                     end
                 end
             end)
         end
     end
-    return cachedMoveStats
 end
 
--- 把速度 / 跳跃高度写进游戏自己的移动属性表（这样蹲下、滑铲都会生效）
-local function applyMoveStats()
-    for _, stats in ipairs(collectMoveStatsTables()) do
-        pcall(function()
-            local baseHeight = jumpBaseHeight[stats]
-            if baseHeight == nil then
-                baseHeight = tonumber(rawget(stats, "JumpHeight")) or 0
-                if baseHeight > 0 then
-                    jumpBaseHeight[stats] = baseHeight
-                end
-            end
-
-            -- 记录原始的速度/加速度，用来做等比例缩放（避免高速时“惯性太强/刹不住”）
-            local base = moveStatsBase[stats]
-            if base == nil then
-                local baseSpeed = tonumber(rawget(stats, "Speed")) or 0
-                if baseSpeed > 0 then
-                    base = {
-                        Speed = baseSpeed,
-                        RunAccel = tonumber(rawget(stats, "RunAccel")) or 0,
-                        RunDeaccel = tonumber(rawget(stats, "RunDeaccel")) or 0,
-                        SprintAcceleration = tonumber(rawget(stats, "SprintAcceleration")) or 0,
-                    }
-                    moveStatsBase[stats] = base
-                end
-            end
-
-            if currentSpeed > 0 then
-                stats.Speed = currentSpeed
-                if base and base.Speed > 0 then
-                    local factor = currentSpeed / base.Speed
-                    if base.RunAccel > 0 then
-                        stats.RunAccel = base.RunAccel * factor
-                    end
-                    if base.RunDeaccel > 0 then
-                        stats.RunDeaccel = base.RunDeaccel * factor
-                    end
-                    if base.SprintAcceleration > 0 then
-                        stats.SprintAcceleration = base.SprintAcceleration * factor
-                    end
-                end
-            end
-            if baseHeight > 0 then
-                stats.JumpHeight = baseHeight * (jumpValue / DEFAULT_JUMP)
-            end
-        end)
-    end
-    if BaseStatsModule then
-        pcall(function()
-            BaseStatsModule.Speed = currentSpeed
-        end)
-    end
-end
-
--- 读取游戏自己的移动输入（优先用游戏数据，避免 Humanoid.MoveDirection 不可靠）
 local function getMovementInput(data)
-    if not data or type(data.Get) ~= "function" then
+    if not data then
         return nil
     end
-    local ok, input = pcall(function()
-        return data:Get("MoveDirection")
-    end)
+    local get = data.Get
+    if type(get) ~= "function" then
+        return nil
+    end
+    local ok, input = pcall(get, data, "MoveDirection")
     if ok then
         return input
     end
     return nil
 end
 
--- 判断是否正在蹲下/滑铲（兼容属性、状态字符串和游戏数据三种来源）
 local function isCrouching(data)
     local character = player.Character
-    if character then
-        local ok, crouching = pcall(function()
-            return character:GetAttribute("Crouching")
-        end)
+    if character and type(character.GetAttribute) == "function" then
+        local ok, crouching = pcall(character.GetAttribute, character, "Crouching")
         if ok and crouching == true then
             return true
         end
-        local stateOk, stateValue = pcall(function()
-            return character:GetAttribute("State")
-        end)
+        local stateOk, stateValue = pcall(character.GetAttribute, character, "State")
         if stateOk and type(stateValue) == "string" then
             if string.find(stateValue, "Crouch") ~= nil or string.find(stateValue, "Slide") ~= nil then
                 return true
             end
         end
     end
-    if data and type(data.Get) == "function" then
-        local ok, crouching = pcall(function()
-            return data:Get("Crouching")
-        end)
-        if ok and crouching == true then
-            return true
-        end
-        local stateOk, stateValue = pcall(function()
-            return data:Get("State")
-        end)
-        if stateOk and type(stateValue) == "string" then
-            if string.find(stateValue, "Crouch") ~= nil or string.find(stateValue, "Slide") ~= nil then
+    if data then
+        local get = data.Get
+        if type(get) == "function" then
+            local ok, crouching = pcall(get, data, "Crouching")
+            if ok and crouching == true then
                 return true
+            end
+            local stateOk, stateValue = pcall(get, data, "State")
+            if stateOk and type(stateValue) == "string" then
+                if string.find(stateValue, "Crouch") ~= nil or string.find(stateValue, "Slide") ~= nil then
+                    return true
+                end
             end
         end
     end
     local container = getGamePlayersContainer()
     local model = container and container:FindFirstChild(player.Name)
-    if not model then
+    if not model or type(model.GetAttribute) ~= "function" then
         return false
     end
-    local modelOk, modelState = pcall(function()
-        return model:GetAttribute("State")
-    end)
+    local modelOk, modelState = pcall(model.GetAttribute, model, "State")
     if modelOk and type(modelState) == "string" then
         if string.find(modelState, "Crouch") ~= nil or string.find(modelState, "Slide") ~= nil then
             return true
@@ -658,8 +1105,17 @@ local function isCrouching(data)
     return false
 end
 
--- 只调整水平速度的“大小”，方向始终沿用游戏自己算出的方向，避免按 A/D 时方向错乱；
--- 没有移动输入时完全不干预（否则松开按键还会被推着走，表现为惯性过强）。
+local crouchCached = false
+local lastCrouchCheck = 0
+local function isCrouchingCached(data)
+    local now = os.clock()
+    if now - lastCrouchCheck >= 0.5 then
+        lastCrouchCheck = now
+        crouchCached = isCrouching(data)
+    end
+    return crouchCached
+end
+
 local function adjustPlaneSpeed(mover, data)
     if mover == nil then
         return
@@ -692,8 +1148,8 @@ local function adjustPlaneSpeed(mover, data)
     if magnitude <= 0 or magnitude >= target then
         return
     end
-    -- 蹲下/滑铲：滑条速度直接生效；普通移动：游戏明显没加速到位时才补速，保持原本手感
-    if not isCrouching(data) and magnitude >= target * 0.5 then
+
+    if not isCrouchingCached(data) and magnitude >= target * 0.5 then
         return
     end
     baseMover.PlaneVelocity = planeVelocity.Unit * target
@@ -713,25 +1169,82 @@ local function installMoveFunctionHooks()
     for name, stateFunction in pairs(MoveFunctions) do
         if type(name) == "string" and type(stateFunction) == "function" then
             MoveFunctions[name] = function(...)
-                local results = packResults(stateFunction(...))
-                pcall(adjustPlaneSpeed, results[1], select(3, ...))
-                return unpackResults(results, 1, results.n)
+                local mover, state = stateFunction(...)
+                pcall(adjustPlaneSpeed, mover, select(3, ...))
+                return mover, state
             end
         end
     end
 end
 
-local function applyJumpToHumanoid()
-    local character = player.Character
-    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-    if not humanoid then
+local function getLiveMoveStats()
+    local stats = getMoveStatsFromCharacter()
+    if stats then
+        return stats
+    end
+    for _, cachedStats in ipairs(collectMoveStatsTables()) do
+        if isUsableMoveStats(cachedStats) then
+            return cachedStats
+        end
+    end
+    return nil
+end
+
+local function loadJumpBase()
+    if BaseStatsModule then
+        local value = tonumber(BaseStatsModule.JumpHeight)
+        if value and value > 0 then
+            jumpBaseHeight = value
+            return value
+        end
+    end
+    return jumpBaseHeight
+end
+
+local function captureJumpBase()
+    if jumpBaseHeight then
         return
     end
-    pcall(function()
-        humanoid.UseJumpPower = true
-        humanoid.JumpPower = math.clamp(jumpPowerForHeight(jumpValue), 0, 1000)
-        humanoid.JumpHeight = jumpValue
-    end)
+    local stats = getLiveMoveStats()
+    if not stats then
+        return
+    end
+    local value = tonumber(rawget(stats, "JumpHeight")) or 0
+    if value > 0 then
+        jumpBaseHeight = value
+    end
+end
+
+local function applyJumpState()
+    local baseHeight = loadJumpBase()
+    if not baseHeight then
+        return
+    end
+    local targetHeight = baseHeight * getJumpMultiplier()
+    local stats = getLiveMoveStats()
+    if stats then
+        pcall(setStatIfChanged, stats, "JumpHeight", targetHeight)
+    end
+    local character = player.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if humanoid then
+        pcall(function()
+            if humanoid.UseJumpPower ~= false then
+                humanoid.UseJumpPower = false
+            end
+            if humanoid.JumpHeight ~= targetHeight then
+                humanoid.JumpHeight = targetHeight
+            end
+        end)
+    end
+    if stats then
+        jumpBaseApplied = true
+    end
+end
+
+local function setJumpLevel(value)
+    jumpLevel = value
+    pcall(applyJumpState)
 end
 
 local function applySpeed(value)
@@ -739,13 +1252,6 @@ local function applySpeed(value)
     pcall(applyMoveStats)
 end
 
-local function applyJump(value)
-    jumpValue = value
-    pcall(applyMoveStats)
-    applyJumpToHumanoid()
-end
-
--- 触发跳跃（优先走游戏自身的角色控制器，旧版本退回 Humanoid）
 local function characterAttemptJump()
     local character = player.Character
     if not character then
@@ -768,19 +1274,65 @@ local function characterAttemptJump()
     end
 end
 
+local lastBaseStatsAttempt = 0
 task.spawn(function()
+    lastBaseStatsAttempt = os.clock()
+    BaseStatsModule = findBaseStats()
+    if BaseStatsModule then
+        pcall(setStatIfChanged, BaseStatsModule, "Speed", DEFAULT_BASE_SPEED)
+    else
+        lastBaseStatsAttempt = 0
+        captureJumpBase()
+    end
     pcall(installMoveFunctionHooks)
     pcall(applyMoveStats)
-    pcall(applyJumpToHumanoid)
+    pcall(applyJumpState)
+    for _ = 1, 20 do
+        if jumpBaseApplied then
+            break
+        end
+        task.wait(0.25)
+        pcall(applyMoveStats)
+        pcall(applyJumpState)
+    end
     while true do
-        task.wait(1)
+
+        task.wait(5)
         if not BaseStatsModule then
-            BaseStatsModule = findBaseStats()
+            local now = os.clock()
+            if now - lastBaseStatsAttempt >= 15 then
+                lastBaseStatsAttempt = now
+                BaseStatsModule = findBaseStats()
+                if BaseStatsModule then
+                    pcall(setStatIfChanged, BaseStatsModule, "Speed", DEFAULT_BASE_SPEED)
+                end
+            end
         end
         pcall(installMoveFunctionHooks)
         pcall(applyMoveStats)
-        pcall(applyJumpToHumanoid)
+        if jumpLevel > 1 or not jumpBaseApplied then
+            pcall(applyJumpState)
+        end
     end
+end)
+
+task.spawn(function()
+    while true do
+        task.wait(0.1)
+        pcall(applyMoveStats)
+    end
+end)
+
+player.CharacterAdded:Connect(function()
+    cachedCharacterObject = nil
+    cachedCharacterObjectAt = 0
+    crouchCached = false
+    lastCrouchCheck = 0
+    task.delay(1, function()
+        captureJumpBase()
+        pcall(applyMoveStats)
+        pcall(applyJumpState)
+    end)
 end)
 
 local lastJumpTime = 0
@@ -802,7 +1354,6 @@ end
 player.CharacterAdded:Connect(hookAutoJump)
 if player.Character then hookAutoJump(player.Character) end
 
--- 自动跳跃：不依赖 Humanoid 状态机，直接用游戏控制器的 Grounded 数据判断
 task.spawn(function()
     while true do
         task.wait(0.1)
@@ -839,7 +1390,6 @@ local downedSince = nil
 local reviveAttempts = 0
 local lastReviveFire = 0
 
--- 触发游戏自己的“复活/重开”远程（当前版本在 ReplicatedStorage.Remotes，旧版本在 Events）
 local function isRemoteEvent(instance)
     if not instance then
         return false
@@ -873,7 +1423,7 @@ local function tryPlayerModeRoot(root)
             return true
         end
     end
-    -- 递归查找同名远程（结构可能比旧版本深）
+
     for _, name in ipairs({ "ChangePlayerMode", "SetPlayerMode" }) do
         local ok, found = pcall(function()
             return root:FindFirstChild(name, true)
@@ -900,7 +1450,6 @@ local function firePlayerModeEvent()
         end
     end
 
-    -- 旧版本兜底：SetPlayerMode:FireServer(UI.GameUIService)
     local services = ReplicatedStorage:FindFirstChild("Services")
     local ui = services and services:FindFirstChild("UI")
     for _, root in ipairs(roots) do
@@ -939,18 +1488,18 @@ local function tryAutoRevive()
         downedSince = now
         return
     end
-    -- 倒地后先等 1.5 秒，避免状态切换瞬间误触
+
     if now - downedSince < 1.5 then
         return
     end
-    -- 连续尝试很多次仍失败时，冷却 30 秒后再重试
+
     if reviveAttempts >= 30 then
         if now - lastReviveFire <= 30 then
             return
         end
         reviveAttempts = 0
     end
-    -- 每 1.5 秒发送一次，直到倒地状态解除
+
     if now - lastReviveFire < 1.5 then
         return
     end
@@ -973,6 +1522,10 @@ local mapCenter = nil
 local hasCenter = false
 local cachedPartsCenter = nil
 local lastFallbackScan = 0
+local cachedSpawnCenter = nil
+local lastSpawnScan = 0
+
+local platformTeleportSuppressedUntil = 0
 
 local function median(t)
     if #t == 0 then return nil end
@@ -1004,45 +1557,69 @@ local function buildPlatform()
     platform.Parent = workspace
 end
 
-local function centerFromSpawns()
-    local xs, ys, zs = {}, {}, {}
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj:IsA("SpawnLocation") then
-            table.insert(xs, obj.Position.X)
-            table.insert(ys, obj.Position.Y)
-            table.insert(zs, obj.Position.Z)
+local function scanContainers(scan)
+    local gameFolder = workspace:FindFirstChild("Game")
+    if gameFolder then
+        local result = scan(gameFolder)
+        if result then
+            return result
         end
     end
-    if #xs == 0 then return nil end
-    return Vector3.new(median(xs), median(ys), median(zs))
+    return scan(workspace)
+end
+
+local function centerFromSpawns()
+    return scanContainers(function(root)
+        local xs, ys, zs = {}, {}, {}
+        for _, obj in ipairs(root:GetDescendants()) do
+            if obj:IsA("SpawnLocation") then
+                xs[#xs + 1] = obj.Position.X
+                ys[#ys + 1] = obj.Position.Y
+                zs[#zs + 1] = obj.Position.Z
+            end
+        end
+        if #xs == 0 then
+            return nil
+        end
+        return Vector3.new(median(xs), median(ys), median(zs))
+    end)
 end
 
 local function centerFromParts()
-    local xs, zs = {}, {}
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj:IsA("BasePart") and obj.Anchored then
-            local sz = obj.Size
-            if sz.X < 500 and sz.Z < 500 then
-                table.insert(xs, obj.Position.X)
-                table.insert(zs, obj.Position.Z)
+    return scanContainers(function(root)
+        local xs, zs = {}, {}
+        for _, obj in ipairs(root:GetDescendants()) do
+            if obj:IsA("BasePart") and obj.Anchored then
+                local sz = obj.Size
+                if sz.X < 500 and sz.Z < 500 then
+                    xs[#xs + 1] = obj.Position.X
+                    zs[#zs + 1] = obj.Position.Z
+                end
             end
         end
-    end
-    if #xs == 0 then return nil end
-    return Vector3.new(median(xs), 0, median(zs))
+        if #xs == 0 then
+            return nil
+        end
+        return Vector3.new(median(xs), 0, median(zs))
+    end)
 end
 
 local function rescanCenter()
+    local now = tick()
+
+    if now - lastSpawnScan >= 10 then
+        lastSpawnScan = now
+        cachedSpawnCenter = centerFromSpawns()
+    end
+
     local newCenter = nil
     local groundY = 0
-
-    local spawnCenter = centerFromSpawns()
+    local spawnCenter = cachedSpawnCenter
     if spawnCenter then
         newCenter = spawnCenter
         groundY = spawnCenter.Y
     else
-        local now = tick()
-        if not cachedPartsCenter or (now - lastFallbackScan >= 20) then
+        if not cachedPartsCenter or (now - lastFallbackScan >= 60) then
             cachedPartsCenter = centerFromParts()
             lastFallbackScan = now
         end
@@ -1088,6 +1665,11 @@ local function teleportToPlatform()
     local target = Vector3.new(platform.Position.X, platform.Position.Y + platform.Size.Y / 2 + 3, platform.Position.Z)
     char:PivotTo(CFrame.new(target))
 
+    pcall(function()
+        root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+        root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+    end)
+
     local humanoid = char:FindFirstChildOfClass("Humanoid")
     if humanoid then
         Camera.CameraSubject = humanoid
@@ -1095,21 +1677,100 @@ local function teleportToPlatform()
     Camera.CFrame = CFrame.lookAt(target + Vector3.new(0, 5, 12), target)
 end
 
+local platformPinned = false
+
+local function platformPinAnchor()
+    if not platform then return nil end
+    return Vector3.new(platform.Position.X, platform.Position.Y + platform.Size.Y / 2 + 3, platform.Position.Z)
+end
+
+local function setPlatformCollide(state)
+    if platform and platform.Parent then
+        pcall(function() platform.CanCollide = state end)
+    end
+end
+
+local function snapCore(root, anchor)
+    root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+    root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+    local current = root.CFrame
+    root.CFrame = CFrame.new(anchor) * (current - current.Position)
+end
+
+local function snapToPlatformAnchor()
+    local char = player.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local anchor = platformPinAnchor()
+    if not root or not anchor then return end
+    pcall(snapCore, root, anchor)
+end
+
+local function pinToPlatform()
+    if not platformEnabled or not platform then
+        platformPinned = false
+        return
+    end
+    local char = player.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root or not platformPinAnchor() then
+        platformPinned = false
+        return
+    end
+    platformPinned = true
+    setPlatformCollide(true)
+    snapToPlatformAnchor()
+end
+
+local function unpinPlatform()
+    platformPinned = false
+    setPlatformCollide(false)
+end
+
+local function destroyPlatformPin()
+    platformPinned = false
+    setPlatformCollide(false)
+end
+
+local function returnToPlatform()
+    if not platformEnabled then return end
+    pcall(teleportToPlatform)
+    platformTeleportSuppressedUntil = tick() + 0.5
+    pcall(pinToPlatform)
+end
+
+RunService.Heartbeat:Connect(function()
+    if not platformPinned or not platformEnabled then return end
+    snapToPlatformAnchor()
+end)
+
+RunService.RenderStepped:Connect(function()
+    if not platformPinned or not platformEnabled then return end
+    snapToPlatformAnchor()
+end)
+
 task.spawn(function()
-    local lastForceTeleport = 0
     local lastRescan = 0
 
     while true do
-        task.wait(0.3)
-        if not platformEnabled then continue end
+        task.wait(0.1)
+        if not platformEnabled then
+            destroyPlatformPin()
+            continue
+        end
 
         local char = player.Character
-        if not char then continue end
+        if not char then
+            destroyPlatformPin()
+            continue
+        end
         local root = char:FindFirstChild("HumanoidRootPart")
-        if not root then continue end
+        if not root then
+            destroyPlatformPin()
+            continue
+        end
 
         local now = tick()
-        if now - lastRescan >= 4 then
+        if now - lastRescan >= 20 then
             lastRescan = now
             rescanCenter()
         end
@@ -1118,15 +1779,28 @@ task.spawn(function()
             if hasCenter then buildPlatform() end
         end
 
-        if not platform then continue end
+        if not platform then
+            destroyPlatformPin()
+            continue
+        end
 
         local top = platform.Position.Y + platform.Size.Y / 2
+        local anchor = Vector3.new(platform.Position.X, top + 3, platform.Position.Z)
         local dropped = root.Position.Y < (top - 25)
-        local timeUp = (now - lastForceTeleport) >= 5
+        local flat = Vector3.new(root.Position.X, 0, root.Position.Z)
+        local flatAnchor = Vector3.new(anchor.X, 0, anchor.Z)
+        local farAway = (flat - flatAnchor).Magnitude > math.max(platform.Size.X * 0.15, 20)
 
-        if dropped or timeUp then
-            lastForceTeleport = now
+        if now < platformTeleportSuppressedUntil then
+            destroyPlatformPin()
+        elseif dropped or farAway then
             teleportToPlatform()
+            pinToPlatform()
+        elseif isDowned() then
+            platformPinned = false
+            setPlatformCollide(true)
+        else
+            pinToPlatform()
         end
     end
 end)
@@ -1136,6 +1810,7 @@ player.CharacterAdded:Connect(function(char)
     char:WaitForChild("HumanoidRootPart", 5)
     if platformEnabled then
         teleportToPlatform()
+        pinToPlatform()
     end
 end)
 
@@ -1151,10 +1826,10 @@ local rescueCFG = {
     ArriveDist = 3,
     HoldDistance = 15,
     PressE = true,
-    PressInterval = 0.01,
+    PressInterval = 0.02,
     TargetSwitchDelay = 1.5,
     MaxDistance = 3000,
-    UpdateInterval = 0.02,
+    UpdateInterval = 0.03,
 }
 
 local function findDownedPlayer()
@@ -1193,10 +1868,20 @@ local function getRescueVelocity(char)
     return rescueVelocity
 end
 
-local function destroyRescueVelocity()
+local function destroyRescueVelocity(stop)
     if rescueVelocity then
         pcall(function() rescueVelocity:Destroy() end)
         rescueVelocity = nil
+    end
+    if stop then
+        local char = player.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        if root then
+            pcall(function()
+                root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+            end)
+        end
     end
 end
 
@@ -1206,7 +1891,7 @@ local function rescueRestoreMove()
         local humanoid = char:FindFirstChildOfClass("Humanoid")
         if humanoid then
             humanoid.WalkSpeed = 16
-            applyJumpToHumanoid()
+            pcall(applyJumpState)
         end
     end
     destroyRescueVelocity()
@@ -1259,7 +1944,10 @@ task.spawn(function()
         if rescueCurrentTarget and not isPlayerDowned(rescueCurrentTarget) then
             rescueReleaseKey()
             rescueCurrentTarget = nil
-            destroyRescueVelocity()
+            destroyRescueVelocity(true)
+            if platformEnabled then
+                returnToPlatform()
+            end
             task.wait(rescueCFG.TargetSwitchDelay)
             continue
         end
@@ -1277,11 +1965,23 @@ task.spawn(function()
         local targetRoot = getRoot(rescueCurrentTarget)
         if not targetRoot then
             rescueCurrentTarget = nil
+            destroyRescueVelocity(true)
             continue
         end
 
         local myRoot = myChar:FindFirstChild("HumanoidRootPart")
         if not myRoot then continue end
+
+        if platformEnabled then
+            platformTeleportSuppressedUntil = tick() + 1.5
+            unpinPlatform()
+            if myRoot.Position.Y - targetRoot.Position.Y > 60 then
+                local landing = targetRoot.Position + Vector3.new(0, rescueCFG.HoverHeight + 20, 0)
+                pcall(function()
+                    myChar:PivotTo(CFrame.new(landing))
+                end)
+            end
+        end
 
         local targetPos = targetRoot.Position + Vector3.new(0, rescueCFG.HoverHeight, 0)
         local diff = targetPos - myRoot.Position
@@ -1318,6 +2018,246 @@ task.spawn(function()
             pcall(function() VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game) end)
             task.wait(0.01)
             pcall(function() VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game) end)
+        end
+    end
+end)
+
+local itemFarmEnabled = false
+local itemFarmPickupDelay = 0.15
+local itemFarmBlacklist = {}
+
+local function getEffectsFolder()
+    local effects = workspace:FindFirstChild("Effects")
+    if effects then
+        return effects
+    end
+    local gameFolder = workspace:FindFirstChild("Game")
+    return gameFolder and gameFolder:FindFirstChild("Effects")
+end
+
+local function getTicketContainer()
+    local effects = getEffectsFolder()
+    if not effects then
+        return nil
+    end
+    return effects:FindFirstChild("Tickets")
+end
+
+local function itemPosition(item)
+    if item:IsA("BasePart") then
+        return item.Position
+    end
+    if item:IsA("Model") or item:IsA("Tool") then
+        local primary = item.PrimaryPart
+        if primary then
+            return primary.Position
+        end
+        local part = item:FindFirstChildWhichIsA("BasePart", true)
+        if part then
+            return part.Position
+        end
+        local ok, pivot = pcall(function()
+            return item:GetPivot().Position
+        end)
+        if ok then
+            return pivot
+        end
+    end
+    return nil
+end
+
+local function getVisiblePart(item)
+    if item:IsA("BasePart") then
+        if item.Transparency < 0.95 then
+            return item
+        end
+        return nil
+    end
+    local primary = nil
+    if item:IsA("Model") then
+        primary = item.PrimaryPart
+    end
+    if primary and primary.Transparency < 0.95 then
+        return primary
+    end
+    for _, descendant in ipairs(item:GetDescendants()) do
+        if descendant:IsA("BasePart") and descendant.Transparency < 0.95 then
+            return descendant
+        end
+    end
+    return nil
+end
+
+local function getTicketPosition(ticket, part)
+    if ticket:IsA("BasePart") then
+        return ticket.Position
+    end
+    if ticket:IsA("Model") then
+        local ok, box = pcall(function()
+            return ticket:GetBoundingBox()
+        end)
+        if ok and box then
+            return box.Position
+        end
+    end
+    if part then
+        return part.Position
+    end
+    return itemPosition(ticket)
+end
+
+local function collectActiveTickets()
+    local container = getTicketContainer()
+    if not container then
+        return {}
+    end
+    local result = {}
+    local function walk(folder, depth)
+        if depth > 4 then
+            return
+        end
+        for _, child in ipairs(folder:GetChildren()) do
+            if child:IsA("Folder") then
+                walk(child, depth + 1)
+            elseif child:IsA("Model") or child:IsA("Tool") or child:IsA("BasePart") then
+                local part = nil
+                if child:IsA("BasePart") then
+                    part = child
+                else
+                    part = getVisiblePart(child)
+                end
+                if part then
+                    local position = getTicketPosition(child, part)
+                    if position then
+                        result[#result + 1] = { object = child, part = part, position = position }
+                    end
+                end
+            end
+        end
+    end
+    walk(container, 0)
+    return result
+end
+
+local function pressE()
+    pcall(function()
+        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+    end)
+    task.wait(0.05)
+    pcall(function()
+        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+    end)
+end
+
+local function fireTouch(rootPart, part)
+    if type(firetouchinterest) ~= "function" then
+        return false
+    end
+    local ok = pcall(function()
+        firetouchinterest(rootPart, part, false)
+    end)
+    task.wait(0.03)
+    pcall(function()
+        firetouchinterest(rootPart, part, true)
+    end)
+    return ok
+end
+
+local function interactTicket(rootPart, ticket, part)
+    local prompt = ticket:FindFirstChildWhichIsA("ProximityPrompt", true)
+    if prompt and prompt.Enabled then
+        if type(fireproximityprompt) == "function" then
+            if pcall(fireproximityprompt, prompt) then
+                return
+            end
+        end
+        local ok = pcall(function()
+            prompt:InputHoldBegin()
+            task.wait(math.clamp(tonumber(prompt.HoldDuration) or 0, 0, 0.4))
+            prompt:InputHoldEnd()
+        end)
+        if ok then
+            return
+        end
+    end
+    local clickDetector = ticket:FindFirstChildWhichIsA("ClickDetector", true)
+    if clickDetector and type(fireclickdetector) == "function" then
+        if pcall(fireclickdetector, clickDetector) then
+            return
+        end
+    end
+    if fireTouch(rootPart, part) then
+        return
+    end
+    pressE()
+end
+
+task.spawn(function()
+    while true do
+        task.wait(0.1)
+        if not itemFarmEnabled then
+            itemFarmBlacklist = {}
+            continue
+        end
+        local container = getTicketContainer()
+        if not container then
+            continue
+        end
+        local character = player.Character
+        local root = character and character:FindFirstChild("HumanoidRootPart")
+        if not root then
+            continue
+        end
+        local humanoid = character:FindFirstChildOfClass("Humanoid")
+        if not humanoid or humanoid.Health <= 0 then
+            continue
+        end
+        local downedOk, downedValue = pcall(function()
+            return character:GetAttribute("Downed")
+        end)
+        if downedOk and downedValue == true then
+            continue
+        end
+
+        local now = tick()
+        local best = nil
+        local bestDistance = math.huge
+        for _, entry in ipairs(collectActiveTickets()) do
+            local blacklistedUntil = itemFarmBlacklist[entry.object]
+            if not blacklistedUntil or now >= blacklistedUntil then
+                local distance = (entry.position - root.Position).Magnitude
+                if distance < bestDistance then
+                    best, bestDistance = entry, distance
+                end
+            end
+        end
+        if not best then
+            continue
+        end
+
+        if platformEnabled then
+            platformTeleportSuppressedUntil = tick() + 2
+            unpinPlatform()
+        end
+
+        pcall(function()
+            character:PivotTo(CFrame.new(best.position + Vector3.new(0, 3, 0)))
+        end)
+        task.wait(0.08)
+        pcall(function()
+            character:PivotTo(CFrame.new(best.position))
+        end)
+        task.wait(0.05)
+        interactTicket(root, best.object, best.part)
+        task.wait(itemFarmPickupDelay)
+
+        local stillThere = best.object.Parent ~= nil and getVisiblePart(best.object) ~= nil
+        if stillThere then
+            itemFarmBlacklist[best.object] = tick() + 1.5
+        end
+
+        if platformEnabled then
+            returnToPlatform()
         end
     end
 end)
@@ -1491,6 +2431,21 @@ local Tab = Window:Tab({
 })
 Window:SelectTab(1)
 
+local helpSection = Tab:Section({
+    Title = "快捷键说明",
+    IconName = "keyboard"
+})
+
+helpSection:Paragraph({
+    Title = "显示 / 隐藏 UI",
+    Desc = "按 Insert 或 F2 键"
+})
+
+helpSection:Paragraph({
+    Title = "打开 / 关闭自动跳跃",
+    Desc = "按 Home 或 F3 键"
+})
+
 local espSection = Tab:Section({
     Title = "ESP",
     IconName = "eye"
@@ -1537,7 +2492,7 @@ local moveSection = Tab:Section({
     IconName = "zap"
 })
 
-moveSection:Toggle({
+autoJumpToggleRef = moveSection:Toggle({
     Title = "自动跳跃",
     Value = false,
     Callback = function(state)
@@ -1560,12 +2515,12 @@ moveSection:Slider({
 moveSection:Slider({
     Title = "跳跃高度",
     Value = {
-        Min = 0,
+        Min = 1,
         Max = 100,
         Default = 1,
     },
     Callback = function(value)
-        applyJump(value)
+        setJumpLevel(value)
     end
 })
 
@@ -1614,6 +2569,7 @@ farmSection:Toggle({
         if state then
             rescanCenter()
         else
+            destroyPlatformPin()
             destroyPlatform()
         end
     end
@@ -1638,6 +2594,32 @@ farmSection:Button({
     Title = "传送至平台",
     Callback = function()
         teleportToPlatform()
+        pinToPlatform()
+    end
+})
+
+local itemSection = Tab:Section({
+    Title = "活动道具",
+    IconName = "hand-heart"
+})
+
+itemSection:Toggle({
+    Title = "自动拾取活动道具",
+    Value = false,
+    Callback = function(state)
+        itemFarmEnabled = state
+    end
+})
+
+itemSection:Slider({
+    Title = "拾取间隔",
+    Value = {
+        Min = 0.05,
+        Max = 0.6,
+        Default = 0.15,
+    },
+    Callback = function(value)
+        itemFarmPickupDelay = value
     end
 })
 
@@ -1730,3 +2712,93 @@ musicSection:Button({
         end
     end
 })
+
+local UI_HIDE_KEYS = { Enum.KeyCode.Insert, Enum.KeyCode.F2 }
+local AUTO_JUMP_KEYS = { Enum.KeyCode.Home, Enum.KeyCode.F3 }
+local uiHidden = false
+
+local UI_SCREEN_GUI_FIELDS = { "ScreenGui", "NotificationGui", "DropdownGui", "TooltipGui" }
+
+local function setWindUiEnabled(enabled)
+    for _, field in ipairs(UI_SCREEN_GUI_FIELDS) do
+        local gui = WindUI[field]
+        if gui then
+            pcall(function()
+                gui.Enabled = enabled
+            end)
+        end
+    end
+end
+
+local function hideOpenButton()
+    pcall(function()
+        local openButton = Window.OpenButtonMain
+        if openButton then
+            openButton:Visible(false)
+        end
+    end)
+end
+
+local function setUiHidden(hidden)
+    uiHidden = hidden
+    pcall(function()
+        Window.IsOpenButtonEnabled = not hidden
+    end)
+    if hidden then
+        pcall(function()
+            Window:Close()
+        end)
+        hideOpenButton()
+        task.delay(0.5, hideOpenButton)
+        setWindUiEnabled(false)
+    else
+        setWindUiEnabled(true)
+        pcall(function()
+            Window:Open()
+        end)
+        local elements = Window.UIElements
+        if elements and elements.Main then
+            pcall(function()
+                elements.Main.Visible = true
+            end)
+        end
+        hideOpenButton()
+    end
+end
+
+local function matchesKeyCode(input, keyCodes)
+    for _, keyCode in ipairs(keyCodes) do
+        if input.KeyCode == keyCode then
+            return true
+        end
+    end
+    return false
+end
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed or input.UserInputType ~= Enum.UserInputType.Keyboard then
+        return
+    end
+    if UserInputService:GetFocusedTextBox() then
+        return
+    end
+    if matchesKeyCode(input, UI_HIDE_KEYS) then
+        setUiHidden(not uiHidden)
+        return
+    end
+    if matchesKeyCode(input, AUTO_JUMP_KEYS) then
+        autoJumpEnabled = not autoJumpEnabled
+        if autoJumpToggleRef then
+            pcall(function()
+                autoJumpToggleRef:Set(autoJumpEnabled)
+            end)
+        end
+        pcall(function()
+            WindUI:Notify({
+                Title = "自动跳跃",
+                Content = autoJumpEnabled and "已开启" or "已关闭",
+                Duration = 1.5
+            })
+        end)
+    end
+end)
