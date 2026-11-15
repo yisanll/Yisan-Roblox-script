@@ -9,16 +9,89 @@ local player = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
 local autoJumpToggleRef = nil
 
-local function fetchWithRetry(url)
-    for _ = 1, 4 do
-        local ok, body = pcall(function()
-            return game:HttpGet(url)
-        end)
-        if ok and type(body) == "string" and #body > 0 then
-            return body
-        end
-        task.wait(0.2)
+-- ============================================================================
+-- 躲避_修复版（针对「开启功能后游戏自己的表情轮盘 G / 道具菜单 2 消失、
+-- 关掉功能也不恢复、只能重进/重连」的问题）
+--
+-- 主要改动：
+--   1) 自动复活默认保持老版可用逻辑（在 Remotes/Events 下找
+--      ChangePlayerMode / SetPlayerMode 并 FireServer —— 2026 版游戏远端位置
+--      变了，实测只有这套老逻辑能让自动复活生效）；「复活」页新增
+--      「兼容模式」开关，关掉后改走保守逻辑（只发已知语义的远端），
+--      用来避开猜发远端把 HUD 状态弄坏的风险。
+--   2) 移动函数 hook 只挂 Run / Air 两个已知函数，并原样返回全部返回值
+--      （旧版把游戏 Movement.Functions 整表替换、只返回两个值，游戏其它
+--      客户端脚本调用到就可能报错，HUD 不再刷新）。
+--   3) 删掉 getgc 全表扫描/写表；不再重写游戏共享的 BaseStats。
+--   4) 自动救不再用 VirtualInputManager 每 0.02 秒连发 E，改成对倒地玩家
+--      的 ProximityPrompt 做 InputHoldBegin / InputHoldEnd（等同真人长按 E）。
+--   5) 只操作自己创建的 BlurEffect，不再动游戏自己的模糊效果。
+--   6) 新增「修复 / 诊断」页：一键退出异常状态 + 请求游戏重生 + 打印 HUD 状态。
+--   7) 移动速度/跳跃高度改成「拖动滑块才生效」：脚本刚加载时不再偷偷改
+--      游戏速度、也不再动 Humanoid 的 UseJumpPower/JumpHeight。
+--   8) 删掉因改动而不再使用的局部变量，并把新增辅助变量收进 do 块 / 表里，
+--      避免 Roblox「单个函数最多 200 个 local 寄存器」的上限报
+--      out of local registers（脚本整个跑不起来）。
+--
+-- 原始版本备份：躲避_原始备份_改前.luau
+-- ============================================================================
+
+-- ===== 多镜像下载：GitHub raw 被墙时的兜底（2026-11-15 本机实测）=====
+-- 实测：raw.githubusercontent.com / cdn.jsdelivr.net 连接被重置，ghfast.top 超时，gh-proxy.com 可用（约 2~3 秒）
+-- 顺序：gh-proxy -> ghproxy.net -> 官方直连 -> jsDelivr -> ghfast（最容易卡住的放最后）
+local function mirrorUrls(url)
+    local owner, repo, branch, path = string.match(
+        url,
+        "^https://raw%.githubusercontent%.com/([^/]+)/([^/]+)/refs/heads/([^/]+)/(.+)$"
+    )
+    if not owner then
+        return { url }
     end
+    local raw = "https://raw.githubusercontent.com/" .. owner .. "/" .. repo .. "/refs/heads/" .. branch .. "/" .. path
+    return {
+        "https://gh-proxy.com/" .. raw,
+        "https://ghproxy.net/" .. raw,
+        raw,
+        "https://cdn.jsdelivr.net/gh/" .. owner .. "/" .. repo .. "@" .. branch .. "/" .. path,
+        "https://ghfast.top/" .. raw,
+    }
+end
+
+local function bodyLooksBroken(body, mustCompile)
+    if type(body) ~= "string" or #body < 32 then
+        return true
+    end
+    local head = string.sub(body, 1, 32)
+    if head == "404: Not Found" or string.find(head, "<?xml", 1, true) or string.find(head, "AccessDenied", 1, true) then
+        return true
+    end
+    if mustCompile and not loadstring(body) then
+        return true
+    end
+    return false
+end
+
+local function fetchWithRetry(url, mustCompile)
+    local urls = mirrorUrls(url)
+    local lastErr = nil
+    for i = 1, #urls do
+        for _ = 1, 2 do
+            local ok, body = pcall(function()
+                return game:HttpGet(urls[i])
+            end)
+            if ok and not bodyLooksBroken(body, mustCompile) then
+                if i > 1 then
+                    print(string.format("[UI] 直连通道失败，改用镜像 %d/%d：%s", i, #urls, urls[i]))
+                end
+                return body
+            end
+            if not ok then
+                lastErr = tostring(body)
+            end
+            task.wait(0.2)
+        end
+    end
+    warn("[UI] 全部 5 个下载通道都失败：" .. tostring(url) .. (lastErr and (" | 最后错误：" .. lastErr) or ""))
     return nil
 end
 
@@ -188,7 +261,7 @@ local function makeIconModule(lucideIcons)
     return module
 end
 
-local lucideSource = fetchWithRetry("https://raw.githubusercontent.com/Footagesus/Icons/refs/heads/main/lucide/dist/Icons.lua")
+local lucideSource = fetchWithRetry("https://raw.githubusercontent.com/Footagesus/Icons/refs/heads/main/lucide/dist/Icons.lua", true)
 local lucideData = compileLuaSource(lucideSource)
 if type(lucideData) ~= "table" then
     lucideData = {}
@@ -209,7 +282,7 @@ do
     end
 end
 
-local uiSource = fetchWithRetry("https://raw.githubusercontent.com/Yisan886/Aero/refs/heads/main/ui.lua.txt")
+local uiSource = fetchWithRetry("https://raw.githubusercontent.com/Yisan886/Aero/refs/heads/main/ui.lua.txt", true)
 if not uiSource then
     error("[躲避] UI 库下载失败，请检查执行器的 HTTP 是否可用")
 end
@@ -392,17 +465,22 @@ if createRainbowBorder(Window, "Fallen Purple") then
     startBorderAnimation(Window, animationSpeed)
 end
 
-local blur = Lighting:FindFirstChildOfClass("BlurEffect")
-if not blur then
-    blur = Instance.new("BlurEffect")
-    blur.Size = 0
-    blur.Parent = Lighting
-end
+-- 修复版：只动自己创建的 BlurEffect，不再复用/改动游戏自己的 BlurEffect
+local blur = Instance.new("BlurEffect")
+blur.Name = "AeroBlur"
+blur.Size = 0
+blur.Parent = Lighting
 
 task.spawn(function()
     local wasOpen = false
     while true do
         task.wait(0.1)
+        if not blur.Parent then
+            blur = Instance.new("BlurEffect")
+            blur.Name = "AeroBlur"
+            blur.Size = 0
+            blur.Parent = Lighting
+        end
         local mainFrame = Window.UIElements and Window.UIElements.Main
         local isOpen = mainFrame and mainFrame.Visible or false
 
@@ -767,7 +845,9 @@ task.spawn(function()
     end
 end)
 
-local currentSpeed = 2000
+-- 修复版：默认不覆盖游戏速度（拖动「移动速度」滑块后才生效），
+-- 避免脚本刚加载就每 0.1 秒改游戏 MoveStats、把移动状态和 HUD 弄不同步。
+local currentSpeed = 0
 local jumpLevel = 1
 local autoJumpEnabled = false
 
@@ -782,29 +862,12 @@ local function getJumpMultiplier()
     return 1 + (jumpLevel - 1) * JUMP_STEP
 end
 
-local MOVE_STAT_KEYS = {
-    "Friction",
-    "AirStrafeAcceleration",
-    "JumpHeight",
-    "RunDeaccel",
-    "JumpSpeedMultiplier",
-    "JumpCap",
-    "SprintCap",
-    "WalkSpeedMultiplier",
-    "BhopEnabled",
-    "Speed",
-    "AirAcceleration",
-    "RunAccel",
-    "SprintAcceleration",
-}
-
 local BaseStatsModule = nil
 local MoveFunctions = nil
 local moveFunctionsHooked = false
 local moveStatsBase = setmetatable({}, { __mode = "k" })
 local cachedMoveStats = {}
 local nextMoveStatsScan = os.clock() + 30
-local moveStatsScanBackoff = 30
 
 local function safeRequire(instance)
     if not instance then
@@ -911,18 +974,6 @@ getLocalCharacterObject = function()
     return nil
 end
 
-local function isMoveStatsTable(tbl)
-    if type(tbl) ~= "table" then
-        return false
-    end
-    for _, key in ipairs(MOVE_STAT_KEYS) do
-        if rawget(tbl, key) == nil then
-            return false
-        end
-    end
-    return true
-end
-
 local function isUsableMoveStats(tbl)
     return type(tbl) == "table" and type(rawget(tbl, "Speed")) == "number"
 end
@@ -959,22 +1010,10 @@ local function collectMoveStatsTables()
     if now < nextMoveStatsScan or not player.Character then
         return cachedMoveStats
     end
+    -- 修复版：不再用 getgc 扫描全局表、往匹配到的任意表里写数值（风险太大），
+    -- 只使用角色自己的实时 MoveStats（getMoveStatsFromCharacter 已处理）。
     cachedMoveStats = {}
-    if type(getgc) == "function" then
-        pcall(function()
-            for _, obj in ipairs(getgc(true)) do
-                if isMoveStatsTable(obj) then
-                    cachedMoveStats[#cachedMoveStats + 1] = obj
-                end
-            end
-        end)
-    end
-    if #cachedMoveStats > 0 then
-        nextMoveStatsScan = now + 30
-    else
-        nextMoveStatsScan = now + moveStatsScanBackoff
-        moveStatsScanBackoff = math.min(moveStatsScanBackoff * 2, 120)
-    end
+    nextMoveStatsScan = now + 60
     return cachedMoveStats
 end
 
@@ -1155,8 +1194,16 @@ local function adjustPlaneSpeed(mover, data)
     baseMover.PlaneVelocity = planeVelocity.Unit * target
 end
 
+-- 修复版：只挂游戏已知的 Run / Air 两个移动状态函数，且原样返回全部返回值。
+-- 旧版会把游戏 Movement.Functions 整表替换成 wrapper、只 return mover,state，
+-- 游戏其它客户端脚本调用到这些函数时可能报错（客户端脚本一旦报错，
+-- 游戏的 HUD 就不会再刷新，表情轮盘/道具菜单会一直不出来，只能重进）。
 local function installMoveFunctionHooks()
     if moveFunctionsHooked then
+        return
+    end
+    -- 修复版：速度还没开（默认 currentSpeed=0）就不动游戏的移动函数
+    if currentSpeed <= 0 then
         return
     end
     if not MoveFunctions then
@@ -1166,12 +1213,14 @@ local function installMoveFunctionHooks()
         return
     end
     moveFunctionsHooked = true
-    for name, stateFunction in pairs(MoveFunctions) do
-        if type(name) == "string" and type(stateFunction) == "function" then
+    for _, name in ipairs({ "Run", "Air" }) do
+        local original = MoveFunctions[name]
+        if type(original) == "function" then
             MoveFunctions[name] = function(...)
-                local mover, state = stateFunction(...)
-                pcall(adjustPlaneSpeed, mover, select(3, ...))
-                return mover, state
+                local results = table.pack(original(...))
+                local data = select(3, ...)
+                pcall(adjustPlaneSpeed, results[1], data)
+                return table.unpack(results, 1, results.n)
             end
         end
     end
@@ -1222,12 +1271,14 @@ local function applyJumpState()
     end
     local targetHeight = baseHeight * getJumpMultiplier()
     local stats = getLiveMoveStats()
-    if stats then
+    -- 修复版：默认（跳跃高度=1）不去改游戏 MoveStats 的 JumpHeight
+    if stats and jumpLevel > 1 then
         pcall(setStatIfChanged, stats, "JumpHeight", targetHeight)
     end
     local character = player.Character
     local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-    if humanoid then
+    -- 修复版：只有真的把「跳跃高度」滑块拉到 >1 才去改 Humanoid；默认不动它。
+    if humanoid and jumpLevel > 1 then
         pcall(function()
             if humanoid.UseJumpPower ~= false then
                 humanoid.UseJumpPower = false
@@ -1279,7 +1330,7 @@ task.spawn(function()
     lastBaseStatsAttempt = os.clock()
     BaseStatsModule = findBaseStats()
     if BaseStatsModule then
-        pcall(setStatIfChanged, BaseStatsModule, "Speed", DEFAULT_BASE_SPEED)
+        -- 修复版：只读游戏 BaseStats，不再往游戏共享模块里写值
     else
         lastBaseStatsAttempt = 0
         captureJumpBase()
@@ -1303,9 +1354,6 @@ task.spawn(function()
             if now - lastBaseStatsAttempt >= 15 then
                 lastBaseStatsAttempt = now
                 BaseStatsModule = findBaseStats()
-                if BaseStatsModule then
-                    pcall(setStatIfChanged, BaseStatsModule, "Speed", DEFAULT_BASE_SPEED)
-                end
             end
         end
         pcall(installMoveFunctionHooks)
@@ -1390,82 +1438,142 @@ local downedSince = nil
 local reviveAttempts = 0
 local lastReviveFire = 0
 
-local function isRemoteEvent(instance)
-    if not instance then
-        return false
-    end
-    local ok, result = pcall(function()
-        return instance:IsA("RemoteEvent") or instance:IsA("UnreliableRemoteEvent")
-    end)
-    return ok and result
-end
+-- ===== 修复版：自动复活（默认恢复老版可用逻辑）=====
+-- 2026 版游戏的重生远端不在旧位置了；把老版「在 Remotes/Events 里找
+-- ChangePlayerMode / SetPlayerMode 再 FireServer」的逻辑删掉，自动复活就
+-- 直接失效（用户实测）。所以默认完整恢复老逻辑：
+--   1) root.Player.ChangePlayerMode / root.Player.SetPlayerMode → FireServer(true)
+--   2) 递归找同名远端 → FireServer(true)
+--   3) 还不行就 SetPlayerMode → FireServer(ui.GameUIService)
+-- 想避开猜发远端（怀疑它把 HUD 状态弄坏）时，在「复活」页关掉「兼容模式」，
+-- 会改走保守逻辑：只发已知语义的 ChangePlayerMode(true) / Respawn()。
+-- 注意：辅助变量全部放进 do 块，避免整个脚本顶层 local 超过 Roblox 的
+-- 200 个寄存器上限（超出会报 out of local registers，脚本直接跑不起来）。
+local EvadeNet = {}
 
-local function fireModeRemote(remote, argument)
-    if not isRemoteEvent(remote) then
-        return false
-    end
-    local ok = pcall(function()
-        remote:FireServer(argument)
-    end)
-    return ok
-end
-
-local function tryPlayerModeRoot(root)
-    if not root then
-        return false
-    end
-    local playerFolder = root:FindFirstChild("Player")
-    if playerFolder then
-        if fireModeRemote(playerFolder:FindFirstChild("ChangePlayerMode"), true) then
-            return true
+do
+    local function isRemoteEvent(instance)
+        if not instance then
+            return false
         end
-        if fireModeRemote(playerFolder:FindFirstChild("SetPlayerMode"), true) then
-            return true
-        end
-    end
-
-    for _, name in ipairs({ "ChangePlayerMode", "SetPlayerMode" }) do
-        local ok, found = pcall(function()
-            return root:FindFirstChild(name, true)
+        local ok, result = pcall(function()
+            return instance:IsA("RemoteEvent") or instance:IsA("UnreliableRemoteEvent")
         end)
-        if ok and fireModeRemote(found, true) then
-            return true
-        end
-    end
-    return false
-end
-
-local function firePlayerModeEvent()
-    local roots = {}
-    for _, rootName in ipairs({ "Remotes", "Events" }) do
-        local root = ReplicatedStorage:FindFirstChild(rootName)
-        if root then
-            roots[#roots + 1] = root
-        end
+        return ok and result
     end
 
-    for _, root in ipairs(roots) do
-        if tryPlayerModeRoot(root) then
-            return true
+    local function fireModeRemote(remote, argument)
+        if not isRemoteEvent(remote) then
+            return false
         end
-    end
-
-    local services = ReplicatedStorage:FindFirstChild("Services")
-    local ui = services and services:FindFirstChild("UI")
-    for _, root in ipairs(roots) do
-        local ok, remote = pcall(function()
-            return root:FindFirstChild("SetPlayerMode", true)
+        local ok = pcall(function()
+            remote:FireServer(argument)
         end)
-        if ok and isRemoteEvent(remote) then
-            local fired = pcall(function()
-                remote:FireServer(ui and ui.GameUIService)
-            end)
-            if fired then
+        return ok
+    end
+
+    local function tryPlayerModeRoot(root)
+        if not root then
+            return false
+        end
+        local playerFolder = root:FindFirstChild("Player")
+        if playerFolder then
+            if fireModeRemote(playerFolder:FindFirstChild("ChangePlayerMode"), true) then
+                return true
+            end
+            if fireModeRemote(playerFolder:FindFirstChild("SetPlayerMode"), true) then
                 return true
             end
         end
+        for _, name in ipairs({ "ChangePlayerMode", "SetPlayerMode" }) do
+            local ok, found = pcall(function()
+                return root:FindFirstChild(name, true)
+            end)
+            if ok and fireModeRemote(found, true) then
+                return true
+            end
+        end
+        return false
     end
-    return false
+
+    local function findRoot(name)
+        return ReplicatedStorage:FindFirstChild(name)
+    end
+
+    local function findRemote(remoteName, folderName)
+        for _, rootName in ipairs({ "Events", "Remotes", "Shared" }) do
+            local root = findRoot(rootName)
+            if root then
+                local parent = root
+                if folderName then
+                    parent = root:FindFirstChild(folderName)
+                end
+                if parent then
+                    local remote = parent:FindFirstChild(remoteName)
+                    if remote and isRemoteEvent(remote) then
+                        return remote
+                    end
+                end
+            end
+        end
+        return nil
+    end
+
+    EvadeNet.changeMode = findRemote("ChangePlayerMode", "Player") or findRemote("ChangePlayerMode")
+    EvadeNet.respawn = findRemote("Respawn") or findRemote("Respawn", "Player") or findRemote("Respawn", "Character")
+    EvadeNet.interact = findRemote("Interact", "Character") or findRemote("Revive", "Character")
+    EvadeNet.compat = true
+
+    function EvadeNet.FireRespawnCompat()
+        local roots = {}
+        for _, rootName in ipairs({ "Remotes", "Events" }) do
+            local root = findRoot(rootName)
+            if root then
+                roots[#roots + 1] = root
+            end
+        end
+        for _, root in ipairs(roots) do
+            if tryPlayerModeRoot(root) then
+                return true
+            end
+        end
+        local services = ReplicatedStorage:FindFirstChild("Services")
+        local ui = services and services:FindFirstChild("UI")
+        for _, root in ipairs(roots) do
+            local ok, remote = pcall(function()
+                return root:FindFirstChild("SetPlayerMode", true)
+            end)
+            if ok and isRemoteEvent(remote) then
+                local fired = pcall(function()
+                    remote:FireServer(ui and ui.GameUIService)
+                end)
+                if fired then
+                    return true
+                end
+            end
+        end
+        return false
+    end
+
+    function EvadeNet.FireRespawnSafe()
+        if EvadeNet.changeMode then
+            local ok = pcall(function()
+                EvadeNet.changeMode:FireServer(true)
+            end)
+            if ok then
+                return true
+            end
+        end
+        if EvadeNet.respawn then
+            local ok = pcall(function()
+                EvadeNet.respawn:FireServer()
+            end)
+            if ok then
+                return true
+            end
+        end
+        return false
+    end
 end
 
 local function isDowned()
@@ -1489,23 +1597,40 @@ local function tryAutoRevive()
         return
     end
 
-    if now - downedSince < 1.5 then
+    if EvadeNet.compat then
+        -- 老版逻辑（原样恢复，默认走这里）：倒地 1.5 秒后开始，每 1.5 秒发一次，
+        -- 最多连发 30 次（30 次后等 30 秒再重来）——之前自动复活能生效就是这套。
+        if now - downedSince < 1.5 then
+            return
+        end
+        if reviveAttempts >= 30 then
+            if now - lastReviveFire <= 30 then
+                return
+            end
+            reviveAttempts = 0
+        end
+        if now - lastReviveFire < 1.5 then
+            return
+        end
+        lastReviveFire = now
+        reviveAttempts = reviveAttempts + 1
+        EvadeNet.FireRespawnCompat()
         return
     end
 
-    if reviveAttempts >= 30 then
-        if now - lastReviveFire <= 30 then
-            return
-        end
-        reviveAttempts = 0
+    -- 保守逻辑（关掉「兼容模式」后走这里）：只发已知语义的远端，避免猜发把 HUD 弄坏
+    if now - downedSince < 2 then
+        return
     end
-
-    if now - lastReviveFire < 1.5 then
+    if reviveAttempts >= 2 then
+        return
+    end
+    if now - lastReviveFire < 3 then
         return
     end
     lastReviveFire = now
     reviveAttempts = reviveAttempts + 1
-    firePlayerModeEvent()
+    EvadeNet.FireRespawnSafe()
 end
 
 task.spawn(function()
@@ -1818,7 +1943,6 @@ local rescueEnabled = false
 local rescueCurrentTarget = nil
 local rescueSelfDowned = false
 local rescueVelocity = nil
-local rescueKeyHeld = false
 
 local rescueCFG = {
     HoverHeight = 3,
@@ -1897,17 +2021,65 @@ local function rescueRestoreMove()
     destroyRescueVelocity()
 end
 
+-- 修复版：不再用 VirtualInputManager 连发/长按 E 键（旧版 0.02 秒一次，
+-- 会污染游戏输入、和游戏自己的按键/HUD 打架）；改成直接对倒地玩家的
+-- ProximityPrompt 做 InputHoldBegin / InputHoldEnd，等价真人按住 E。
+-- 状态都塞进一张表里，少占顶层 local。
+local rescuePrompt = {
+    held = nil,
+    startedAt = 0,
+    lastInteractFire = 0,
+}
+
 local function rescueHoldKey()
-    if not rescueKeyHeld then
-        rescueKeyHeld = true
-        pcall(function() VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game) end)
+    local target = rescueCurrentTarget
+    if not target or not target.Parent then
+        return
+    end
+    local prompt = nil
+    pcall(function()
+        prompt = target:FindFirstChildWhichIsA("ProximityPrompt", true)
+    end)
+    if prompt and prompt.Enabled then
+        if rescuePrompt.held ~= prompt then
+            if rescuePrompt.held then
+                pcall(function()
+                    rescuePrompt.held:InputHoldEnd()
+                end)
+            end
+            rescuePrompt.held = prompt
+            rescuePrompt.startedAt = os.clock()
+            pcall(function()
+                prompt:InputHoldBegin()
+            end)
+        elseif os.clock() - rescuePrompt.startedAt > 10 then
+            -- 防止一直按住不放：10 秒后松开一下再重按
+            pcall(function()
+                prompt:InputHoldEnd()
+            end)
+            rescuePrompt.held = nil
+        end
+        return
+    end
+
+    -- 找不到提示时，退回游戏公开的 Interact 远端（节流 1 秒一次）
+    local now = os.clock()
+    if EvadeNet.interact and now - rescuePrompt.lastInteractFire >= 1 then
+        rescuePrompt.lastInteractFire = now
+        local targetName = target.Name
+        pcall(function()
+            EvadeNet.interact:FireServer("Revive", true, targetName)
+        end)
     end
 end
 
 local function rescueReleaseKey()
-    if rescueKeyHeld then
-        rescueKeyHeld = false
-        pcall(function() VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game) end)
+    local prompt = rescuePrompt.held
+    rescuePrompt.held = nil
+    if prompt then
+        pcall(function()
+            prompt:InputHoldEnd()
+        end)
     end
 end
 
@@ -2003,21 +2175,6 @@ task.spawn(function()
             if rescueCFG.PressE then rescueHoldKey() end
         else
             rescueReleaseKey()
-        end
-    end
-end)
-
-task.spawn(function()
-    while true do
-        task.wait(rescueCFG.PressInterval)
-        if not rescueEnabled or rescueSelfDowned then
-            rescueReleaseKey()
-            continue
-        end
-        if rescueKeyHeld then
-            pcall(function() VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game) end)
-            task.wait(0.01)
-            pcall(function() VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game) end)
         end
     end
 end)
@@ -2446,6 +2603,11 @@ helpSection:Paragraph({
     Desc = "按 Home 或 F3 键"
 })
 
+helpSection:Paragraph({
+    Title = "修复游戏 HUD（表情轮盘/道具菜单不显示）",
+    Desc = "功能页最下面的「修复 / 诊断」"
+})
+
 local espSection = Tab:Section({
     Title = "ESP",
     IconName = "eye"
@@ -2534,6 +2696,15 @@ reviveSection:Toggle({
     Value = false,
     Callback = function(state)
         autoRevive = state
+    end
+})
+
+reviveSection:Toggle({
+    Title = "自动复活(兼容模式)",
+    Desc = "默认开：沿用老版找远端方式（最稳）；关掉后只发保守的重生远端",
+    Value = true,
+    Callback = function(state)
+        EvadeNet.compat = state
     end
 })
 
@@ -2712,6 +2883,244 @@ musicSection:Button({
         end
     end
 })
+
+-- ===== 修复版新增：应急退出异常状态 / 修复游戏 HUD / 诊断 =====
+-- 游戏自己的表情轮盘(G)、道具菜单(2) 属于 PlayerGui 里的游戏 HUD，由游戏的
+-- 玩家模式/状态驱动；脚本没法直接把它们“变回来”，但可以让游戏走一次正常的
+-- 重生流程（重发角色/UI 状态），这是不重进服务器时最稳的恢复办法。
+-- 注意：本段整体放进 do 块，避免顶层 local 超过 Roblox 的 200 个寄存器上限。
+do
+local function collectPlayerGuiInfo()
+    local info = {}
+    local pg = player:FindFirstChildOfClass("PlayerGui")
+    if not pg then
+        return info
+    end
+    local function pushRow(obj)
+        local okEnabled, enabled = pcall(function()
+            return obj.Enabled
+        end)
+        local okVisible, visible = pcall(function()
+            return obj.Visible
+        end)
+        info[#info + 1] = string.format(
+            "PlayerGui.%s [%s] Enabled=%s Visible=%s",
+            obj.Name,
+            obj.ClassName,
+            okEnabled and tostring(enabled) or "-",
+            okVisible and tostring(visible) or "-"
+        )
+    end
+    for _, child in ipairs(pg:GetChildren()) do
+        pushRow(child)
+        local lower = string.lower(child.Name)
+        if child:IsA("Folder") or lower == "hud" or lower == "shared" or lower == "maininterface" then
+            local inner = child:FindFirstChild("HUD") or child
+            for _, hudChild in ipairs(inner:GetChildren()) do
+                pushRow(hudChild)
+            end
+        end
+    end
+    return info
+end
+
+local function printHudDiagnostics()
+    print("===== [躲避] HUD 诊断开始（把 F9 控制台这段发给我）=====")
+    print("PlaceId =", tostring(game.PlaceId))
+    for key, value in pairs(player:GetAttributes()) do
+        print("Player 属性:", key, tostring(value))
+    end
+    local char = player.Character
+    if char then
+        for key, value in pairs(char:GetAttributes()) do
+            print("角色属性:", key, tostring(value))
+        end
+        local humanoid = char:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            print("Humanoid.Health =", humanoid.Health, "FloorMaterial =", tostring(humanoid.FloorMaterial))
+        end
+    else
+        print("(没有角色)")
+    end
+
+    local characterObject = nil
+    pcall(function()
+        characterObject = getLocalCharacterObject()
+    end)
+    local dataRegistry = characterObject and characterObject.DataRegistry
+    if dataRegistry and dataRegistry.Get then
+        for _, key in ipairs({ "Mode", "State", "Downed", "Emote", "Carried", "InMenu", "Dead", "RoundState", "Movement" }) do
+            local ok, value = pcall(function()
+                return dataRegistry:Get(key)
+            end)
+            print("DataRegistry." .. key .. " =", ok and tostring(value) or "读取失败")
+        end
+    else
+        print("(拿不到 DataRegistry)")
+    end
+
+    local pg = player:FindFirstChildOfClass("PlayerGui")
+    if pg then
+        print("PlayerGui 子节点数:", #pg:GetChildren())
+    end
+    for _, row in ipairs(collectPlayerGuiInfo()) do
+        print(row)
+    end
+
+    -- 游戏 HUD（PlayerGui.Game.HUD）结构 + 弹窗打开状态
+    local gameGui = pg and pg:FindFirstChild("Game")
+    local hud = gameGui and gameGui:FindFirstChild("HUD")
+    print("PlayerGui.Game 存在 =", tostring(gameGui ~= nil), "Game.Enabled =", gameGui and tostring(gameGui.Enabled) or "-")
+    print("Game.HUD 存在 =", tostring(hud ~= nil))
+    local interactors = hud and hud:FindFirstChild("Interactors")
+    local popups = interactors and interactors:FindFirstChild("Popups")
+    if interactors then
+        for _, child in ipairs(interactors:GetChildren()) do
+            local visible = "-"
+            pcall(function()
+                visible = tostring(child.Visible)
+            end)
+            print("Interactors:", child.Name, child.ClassName, "Visible=" .. visible)
+        end
+    else
+        print("(找不到 Game.HUD.Interactors)")
+    end
+    if popups then
+        for _, child in ipairs(popups:GetChildren()) do
+            local visible = "-"
+            pcall(function()
+                visible = tostring(child.Visible)
+            end)
+            print("Popups:", child.Name, child.ClassName, "Visible=" .. visible)
+        end
+    else
+        print("(找不到 Game.HUD.Interactors.Popups)")
+    end
+
+    local StarterGui = game:GetService("StarterGui")
+    for _, guiType in ipairs({
+        Enum.CoreGuiType.Backpack,
+        Enum.CoreGuiType.EmotesMenu,
+        Enum.CoreGuiType.PlayerList,
+        Enum.CoreGuiType.Chat,
+    }) do
+        local ok, enabled = pcall(function()
+            return StarterGui:GetCoreGuiEnabled(guiType)
+        end)
+        print("CoreGuiEnabled." .. guiType.Name .. " =", ok and tostring(enabled) or "读取失败")
+    end
+
+    print(
+        "重生远端: ChangePlayerMode =",
+        tostring(EvadeNet.changeMode ~= nil),
+        " Respawn =",
+        tostring(EvadeNet.respawn ~= nil),
+        " Character.Interact =",
+        tostring(EvadeNet.interact ~= nil),
+        " 兼容模式 =",
+        tostring(EvadeNet.compat)
+    )
+    print("===== [躲避] HUD 诊断结束 =====")
+end
+
+local function stopAllDangerousFeatures()
+    autoJumpEnabled = false
+    autoRevive = false
+    rescueEnabled = false
+    platformEnabled = false
+    itemFarmEnabled = false
+    boomboxEnabled = false
+    rescueSelfDowned = false
+    -- 修复版：停掉速度/跳跃的持续写入，让游戏自己恢复角色移动
+    currentSpeed = 0
+    jumpLevel = 1
+    pcall(rescueReleaseKey)
+    pcall(function()
+        destroyPlatformPin()
+        destroyPlatform()
+    end)
+    pcall(function()
+        destroyRescueVelocity(true)
+    end)
+    pcall(function()
+        if bbCurrent then
+            bbDestroy()
+        end
+    end)
+    -- 尝试关掉可能“卡在打开状态”的游戏弹窗（表情轮盘/道具菜单都是 Popups 子节点），
+    -- 卡住的弹窗会让游戏 HUD 按键只“关”不“开”，看起来就像菜单消失。
+    pcall(function()
+        local pg = player:FindFirstChildOfClass("PlayerGui")
+        local gameGui = pg and pg:FindFirstChild("Game")
+        local hud = gameGui and gameGui:FindFirstChild("HUD")
+        local interactors = hud and hud:FindFirstChild("Interactors")
+        local popups = interactors and interactors:FindFirstChild("Popups")
+        if popups then
+            for _, child in ipairs(popups:GetChildren()) do
+                pcall(function()
+                    child.Visible = false
+                end)
+            end
+        end
+    end)
+    local char = player.Character
+    if char then
+        local humanoid = char:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            pcall(function()
+                humanoid.WalkSpeed = 16
+            end)
+        end
+    end
+end
+
+local function repairGameHud()
+    stopAllDangerousFeatures()
+    printHudDiagnostics()
+    local fired = EvadeNet.FireRespawnCompat()
+    if fired then
+        pcall(function()
+            WindUI:Notify({
+                Title = "修复 HUD",
+                Content = "已请求游戏重生，角色重生后表情/道具菜单应恢复",
+                Duration = 5,
+            })
+        end)
+        task.delay(4, function()
+            pcall(printHudDiagnostics)
+        end)
+    else
+        pcall(function()
+            WindUI:Notify({
+                Title = "修复 HUD",
+                Content = "没找到游戏的重生远端，只能重进服务器",
+                Duration = 5,
+            })
+        end)
+    end
+end
+
+local repairSection = Tab:Section({
+    Title = "修复 / 诊断",
+    IconName = "wrench"
+})
+
+repairSection:Button({
+    Title = "退出异常状态并修复 HUD",
+    Desc = "关功能、清速度/平台/按键、关掉卡住的弹窗，再请求游戏重生一次",
+    Callback = function()
+        pcall(repairGameHud)
+    end
+})
+
+repairSection:Button({
+    Title = "打印 HUD 诊断到 F9 控制台",
+    Callback = function()
+        pcall(printHudDiagnostics)
+    end
+})
+
+end
 
 local UI_HIDE_KEYS = { Enum.KeyCode.Insert, Enum.KeyCode.F2 }
 local AUTO_JUMP_KEYS = { Enum.KeyCode.Home, Enum.KeyCode.F3 }
