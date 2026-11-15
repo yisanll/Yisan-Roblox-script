@@ -9,36 +9,6 @@ local player = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
 local autoJumpToggleRef = nil
 
--- ============================================================================
--- Evade_fixed (targets the bug: after enabling some features, Evade's own
--- Emote Wheel (G) / Item Menu (2) disappear; closing features does not restore
---
--- Main changes:
---   1) Auto Revive keeps the old working logic by default (looks for
---      ChangePlayerMode / SetPlayerMode under Remotes/Events and FireServer(true) --
---      on the 2026 build only this old logic actually works). New toggle on
---      the Revive page: turn 'Auto Revive (Compat)' OFF to use conservative
---      known-semantics remotes only, avoiding guessed remotes that may break HUD state.
---   2) Movement function hooks only wrap Run / Air and preserve ALL return values
---      (old version replaced the whole Movement.Functions table and returned only
---       mover,state, which could error other client scripts and stop HUD refresh).
---   3) Removed getgc global-table scan/writes; no longer rewrites game BaseStats.
---   4) Auto Rescue no longer spams VirtualInputManager every 0.02s; it uses the downed
---      player's ProximityPrompt InputHoldBegin / InputHoldEnd (same as holding E).
---   5) Only creates/uses its own BlurEffect; never touches the game's blur.
---   6) New 'Fix / Diagnostics' page: exit bad state + request respawn + print HUD state.
---   7) Move Speed / Jump Height only apply after you drag the slider (no silent
---      changes on load; no Humanoid UseJumpPower/JumpHeight edits by default).
---   8) Removed unused locals and moved new helpers into do-blocks/tables to stay
---      under Roblox's 200-local-register limit (otherwise: out of local registers,
---      the whole script fails to compile).
---
--- Original backup: Evade_original_before_fix.luau
--- ============================================================================
-
--- ===== Multi-mirror download: fallback when GitHub raw is blocked (tested on this machine 2026-11-15) =====
--- Tested: raw.githubusercontent.com / cdn.jsdelivr.net reset the connection, ghfast.top timed out, gh-proxy.com works (~2-3s)
--- Order: gh-proxy -> ghproxy.net -> direct -> jsDelivr -> ghfast (slowest last)
 local function mirrorUrls(url)
     local owner, repo, branch, path = string.match(
         url,
@@ -80,9 +50,6 @@ local function fetchWithRetry(url, mustCompile)
                 return game:HttpGet(urls[i])
             end)
             if ok and not bodyLooksBroken(body, mustCompile) then
-                if i > 1 then
-                    print(string.format("[UI] Direct channel failed, switched to mirror %d/%d: %s", i, #urls, urls[i]))
-                end
                 return body
             end
             if not ok then
@@ -465,7 +432,6 @@ if createRainbowBorder(Window, "Fallen Purple") then
     startBorderAnimation(Window, animationSpeed)
 end
 
--- Fix: only create/use our own BlurEffect; never reuse/modify the game's BlurEffect
 local blur = Instance.new("BlurEffect")
 blur.Name = "AeroBlur"
 blur.Size = 0
@@ -845,8 +811,6 @@ task.spawn(function()
     end
 end)
 
--- Fix: do not override move speed by default (only after dragging the Move Speed slider),
--- so the script no longer rewrites game MoveStats every 0.1s on load (which desyncs movement/HUD).
 local currentSpeed = 0
 local jumpLevel = 1
 local autoJumpEnabled = false
@@ -1010,8 +974,7 @@ local function collectMoveStatsTables()
     if now < nextMoveStatsScan or not player.Character then
         return cachedMoveStats
     end
-    -- Fix: no more getgc global-table scanning / writing into arbitrary matched tables (too risky);
-    -- only the character's live MoveStats is used (handled by getMoveStatsFromCharacter).
+
     cachedMoveStats = {}
     nextMoveStatsScan = now + 60
     return cachedMoveStats
@@ -1194,15 +1157,11 @@ local function adjustPlaneSpeed(mover, data)
     baseMover.PlaneVelocity = planeVelocity.Unit * target
 end
 
--- Fix: only hook the known Run / Air movement state functions, preserving ALL return values.
--- Old version replaced the whole game Movement.Functions table with wrappers that
--- returned only mover,state; other client scripts calling them could error, and once a
--- client script errors the game HUD stops refreshing (emote wheel / item menu never show).
 local function installMoveFunctionHooks()
     if moveFunctionsHooked then
         return
     end
-    -- Fix: do not touch game movement functions while speed is off (currentSpeed=0 by default)
+
     if currentSpeed <= 0 then
         return
     end
@@ -1271,13 +1230,13 @@ local function applyJumpState()
     end
     local targetHeight = baseHeight * getJumpMultiplier()
     local stats = getLiveMoveStats()
-    -- Fix: do not modify game MoveStats JumpHeight by default (Jump Height = 1)
+
     if stats and jumpLevel > 1 then
         pcall(setStatIfChanged, stats, "JumpHeight", targetHeight)
     end
     local character = player.Character
     local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-    -- Fix: only touch the Humanoid when the Jump Height slider is really > 1; leave it alone by default.
+
     if humanoid and jumpLevel > 1 then
         pcall(function()
             if humanoid.UseJumpPower ~= false then
@@ -1330,7 +1289,7 @@ task.spawn(function()
     lastBaseStatsAttempt = os.clock()
     BaseStatsModule = findBaseStats()
     if BaseStatsModule then
-        -- Fix: read-only access to game BaseStats; no writes into the shared module
+
     else
         lastBaseStatsAttempt = 0
         captureJumpBase()
@@ -1438,17 +1397,6 @@ local downedSince = nil
 local reviveAttempts = 0
 local lastReviveFire = 0
 
--- ===== Fix version: Auto Revive (old working logic restored by default) =====
--- On the 2026 build the respawn remotes are no longer where they used to be; deleting the old
--- 'find ChangePlayerMode / SetPlayerMode under Remotes/Events and FireServer' logic made
--- Auto Revive stop working (confirmed in-game). So the full old logic is restored by default:
---   1) root.Player.ChangePlayerMode / root.Player.SetPlayerMode → FireServer(true)
---   2) recursive search for a same-named remote -> FireServer(true)
---   3) last resort: SetPlayerMode -> FireServer(ui.GameUIService)
--- To avoid the guessed-remote behavior (suspected of breaking HUD state), turn off
--- 'Auto Revive (Compat)' on the Revive page; it then only fires known-semantics remotes.
--- Note: all helper variables live in a do-block so the script's top-level locals stay
--- under Roblox's 200-register limit (otherwise: out of local registers, the script won't run).
 local EvadeNet = {}
 
 do
@@ -1598,8 +1546,7 @@ local function tryAutoRevive()
     end
 
     if EvadeNet.compat then
-        -- Old logic (restored as-is, used by default): starts 1.5s after downed, fires every 1.5s,
-        -- up to 30 times (then waits 30s before retrying) -- this is what made Auto Revive work.
+
         if now - downedSince < 1.5 then
             return
         end
@@ -1618,7 +1565,6 @@ local function tryAutoRevive()
         return
     end
 
-    -- Conservative logic (when Compat is OFF): known-semantics remotes only, avoids guessing and HUD risk
     if now - downedSince < 2 then
         return
     end
@@ -2021,10 +1967,6 @@ local function rescueRestoreMove()
     destroyRescueVelocity()
 end
 
--- Fix: no more VirtualInputManager spam/hold of the E key (old: every 0.02s,
--- which polluted game input and fought with the game's own keys/HUD); instead uses the
--- downed player's ProximityPrompt InputHoldBegin / InputHoldEnd, same as holding E.
--- State is packed into one table to save top-level locals.
 local rescuePrompt = {
     held = nil,
     startedAt = 0,
@@ -2053,7 +1995,7 @@ local function rescueHoldKey()
                 prompt:InputHoldBegin()
             end)
         elseif os.clock() - rescuePrompt.startedAt > 10 then
-            -- avoid holding forever: release and re-press after 10 seconds
+
             pcall(function()
                 prompt:InputHoldEnd()
             end)
@@ -2062,7 +2004,6 @@ local function rescueHoldKey()
         return
     end
 
-    -- if no prompt is found, fall back to the game's public Interact remote (1s throttle)
     local now = os.clock()
     if EvadeNet.interact and now - rescuePrompt.lastInteractFire >= 1 then
         rescuePrompt.lastInteractFire = now
@@ -2605,7 +2546,7 @@ helpSection:Paragraph({
 
 helpSection:Paragraph({
     Title = "Fix game HUD (emote wheel / item menu not showing)",
-    Desc = "Bottom of the Features page: Fix / Diagnostics"
+    Desc = "Bottom of the Features page: Fix"
 })
 
 local espSection = Tab:Section({
@@ -2884,145 +2825,7 @@ musicSection:Button({
     end
 })
 
--- ===== Fix version additions: emergency exit bad state / fix game HUD / diagnostics =====
--- The game's own Emote Wheel (G) / Item Menu (2) are part of the in-game HUD inside
--- PlayerGui, driven by the game's player mode/state; we cannot force them back directly,
--- but we can make the game run a normal respawn flow (re-send character/UI state), which is
--- the most reliable in-session recovery without rejoining.
 do
-local function collectPlayerGuiInfo()
-    local info = {}
-    local pg = player:FindFirstChildOfClass("PlayerGui")
-    if not pg then
-        return info
-    end
-    local function pushRow(obj)
-        local okEnabled, enabled = pcall(function()
-            return obj.Enabled
-        end)
-        local okVisible, visible = pcall(function()
-            return obj.Visible
-        end)
-        info[#info + 1] = string.format(
-            "PlayerGui.%s [%s] Enabled=%s Visible=%s",
-            obj.Name,
-            obj.ClassName,
-            okEnabled and tostring(enabled) or "-",
-            okVisible and tostring(visible) or "-"
-        )
-    end
-    for _, child in ipairs(pg:GetChildren()) do
-        pushRow(child)
-        local lower = string.lower(child.Name)
-        if child:IsA("Folder") or lower == "hud" or lower == "shared" or lower == "maininterface" then
-            local inner = child:FindFirstChild("HUD") or child
-            for _, hudChild in ipairs(inner:GetChildren()) do
-                pushRow(hudChild)
-            end
-        end
-    end
-    return info
-end
-
-local function printHudDiagnostics()
-    print("===== [Evade] HUD diagnostics start (send me this F9 console output)=====")
-    print("PlaceId =", tostring(game.PlaceId))
-    for key, value in pairs(player:GetAttributes()) do
-        print("Player attribute:", key, tostring(value))
-    end
-    local char = player.Character
-    if char then
-        for key, value in pairs(char:GetAttributes()) do
-            print("Character attribute:", key, tostring(value))
-        end
-        local humanoid = char:FindFirstChildOfClass("Humanoid")
-        if humanoid then
-            print("Humanoid.Health =", humanoid.Health, "FloorMaterial =", tostring(humanoid.FloorMaterial))
-        end
-    else
-        print("(no character)")
-    end
-
-    local characterObject = nil
-    pcall(function()
-        characterObject = getLocalCharacterObject()
-    end)
-    local dataRegistry = characterObject and characterObject.DataRegistry
-    if dataRegistry and dataRegistry.Get then
-        for _, key in ipairs({ "Mode", "State", "Downed", "Emote", "Carried", "InMenu", "Dead", "RoundState", "Movement" }) do
-            local ok, value = pcall(function()
-                return dataRegistry:Get(key)
-            end)
-            print("DataRegistry." .. key .. " =", ok and tostring(value) or "read failed")
-        end
-    else
-        print("(DataRegistry unavailable)")
-    end
-
-    local pg = player:FindFirstChildOfClass("PlayerGui")
-    if pg then
-        print("PlayerGui children:", #pg:GetChildren())
-    end
-    for _, row in ipairs(collectPlayerGuiInfo()) do
-        print(row)
-    end
-
-    -- Game HUD (PlayerGui.Game.HUD) structure + popup open state
-    local gameGui = pg and pg:FindFirstChild("Game")
-    local hud = gameGui and gameGui:FindFirstChild("HUD")
-    print("PlayerGui.Game exists =", tostring(gameGui ~= nil), "Game.Enabled =", gameGui and tostring(gameGui.Enabled) or "-")
-    print("Game.HUD exists =", tostring(hud ~= nil))
-    local interactors = hud and hud:FindFirstChild("Interactors")
-    local popups = interactors and interactors:FindFirstChild("Popups")
-    if interactors then
-        for _, child in ipairs(interactors:GetChildren()) do
-            local visible = "-"
-            pcall(function()
-                visible = tostring(child.Visible)
-            end)
-            print("Interactors:", child.Name, child.ClassName, "Visible=" .. visible)
-        end
-    else
-        print("(Game.HUD.Interactors not found)")
-    end
-    if popups then
-        for _, child in ipairs(popups:GetChildren()) do
-            local visible = "-"
-            pcall(function()
-                visible = tostring(child.Visible)
-            end)
-            print("Popups:", child.Name, child.ClassName, "Visible=" .. visible)
-        end
-    else
-        print("(Game.HUD.Interactors.Popups not found)")
-    end
-
-    local StarterGui = game:GetService("StarterGui")
-    for _, guiType in ipairs({
-        Enum.CoreGuiType.Backpack,
-        Enum.CoreGuiType.EmotesMenu,
-        Enum.CoreGuiType.PlayerList,
-        Enum.CoreGuiType.Chat,
-    }) do
-        local ok, enabled = pcall(function()
-            return StarterGui:GetCoreGuiEnabled(guiType)
-        end)
-        print("CoreGuiEnabled." .. guiType.Name .. " =", ok and tostring(enabled) or "read failed")
-    end
-
-    print(
-        "Respawn remotes: ChangePlayerMode =",
-        tostring(EvadeNet.changeMode ~= nil),
-        " Respawn =",
-        tostring(EvadeNet.respawn ~= nil),
-        " Character.Interact =",
-        tostring(EvadeNet.interact ~= nil),
-        " Compat =",
-        tostring(EvadeNet.compat)
-    )
-    print("===== [Evade] HUD diagnostics end =====")
-end
-
 local function stopAllDangerousFeatures()
     autoJumpEnabled = false
     autoRevive = false
@@ -3031,7 +2834,7 @@ local function stopAllDangerousFeatures()
     itemFarmEnabled = false
     boomboxEnabled = false
     rescueSelfDowned = false
-    -- Fix: stop continuous speed/jump writes so the game can restore movement itself
+
     currentSpeed = 0
     jumpLevel = 1
     pcall(rescueReleaseKey)
@@ -3047,8 +2850,7 @@ local function stopAllDangerousFeatures()
             bbDestroy()
         end
     end)
-    -- Try to close game popups that are stuck in the 'open' state (emote wheel / item menu are Popups children);
-    -- a stuck popup makes the HUD key only close (never open), which looks like the menu disappeared.
+
     pcall(function()
         local pg = player:FindFirstChildOfClass("PlayerGui")
         local gameGui = pg and pg:FindFirstChild("Game")
@@ -3076,7 +2878,6 @@ end
 
 local function repairGameHud()
     stopAllDangerousFeatures()
-    printHudDiagnostics()
     local fired = EvadeNet.FireRespawnCompat()
     if fired then
         pcall(function()
@@ -3085,9 +2886,6 @@ local function repairGameHud()
                 Content = "Respawn requested. Emote / item menus should return after respawn",
                 Duration = 5,
             })
-        end)
-        task.delay(4, function()
-            pcall(printHudDiagnostics)
         end)
     else
         pcall(function()
@@ -3101,7 +2899,7 @@ local function repairGameHud()
 end
 
 local repairSection = Tab:Section({
-    Title = "Fix / Diagnostics",
+    Title = "Fix",
     IconName = "wrench"
 })
 
@@ -3110,13 +2908,6 @@ repairSection:Button({
     Desc = "Stop features, clear speed/platform/keys, close stuck popups, then request a respawn",
     Callback = function()
         pcall(repairGameHud)
-    end
-})
-
-repairSection:Button({
-    Title = "Print HUD diagnostics to F9 console",
-    Callback = function()
-        pcall(printHudDiagnostics)
     end
 })
 
