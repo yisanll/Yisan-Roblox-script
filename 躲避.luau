@@ -811,7 +811,9 @@ task.spawn(function()
     end
 end)
 
-local currentSpeed = 0
+local speedMultiplier = 1
+local speedApplied = false
+local moveBaseSpeed = nil
 local jumpLevel = 1
 local autoJumpEnabled = false
 
@@ -827,9 +829,6 @@ local function getJumpMultiplier()
 end
 
 local BaseStatsModule = nil
-local MoveFunctions = nil
-local moveFunctionsHooked = false
-local moveStatsBase = setmetatable({}, { __mode = "k" })
 local cachedMoveStats = {}
 local nextMoveStatsScan = os.clock() + 30
 
@@ -870,39 +869,6 @@ local function findBaseStats()
     end
     if type(module) == "table" then
         return module
-    end
-    return nil
-end
-
-local function findMoveFunctions()
-    local movement = findMovementInstance()
-    if not movement then
-        return nil
-    end
-    local moveFunction = movement:FindFirstChild("MoveFunction")
-    if moveFunction then
-        local functions = safeRequire(moveFunction:FindFirstChild("Functions"))
-        if type(functions) == "table" then
-            return functions
-        end
-        local moveFunctionModule = safeRequire(moveFunction)
-        if type(moveFunctionModule) == "table" and type(moveFunctionModule.Functions) == "table" then
-            return moveFunctionModule.Functions
-        end
-    end
-    local functions = safeRequire(movement:FindFirstChild("Functions"))
-    if type(functions) == "table" then
-        return functions
-    end
-    local movementModule = safeRequire(movement)
-    if type(movementModule) == "table" then
-        if type(movementModule.Functions) == "table" then
-            return movementModule.Functions
-        end
-        local moveFunctionModule = movementModule.MoveFunction
-        if type(moveFunctionModule) == "table" and type(moveFunctionModule.Functions) == "table" then
-            return moveFunctionModule.Functions
-        end
     end
     return nil
 end
@@ -988,201 +954,49 @@ local function setStatIfChanged(stats, key, value)
     return false
 end
 
-local DEFAULT_BASE_SPEED = 1500
-
-local function getDefaultMoveStatsBase()
+local function resolveMoveBaseSpeed()
+    if moveBaseSpeed then
+        return moveBaseSpeed
+    end
     if BaseStatsModule then
-        local speed = tonumber(BaseStatsModule.Speed)
-        if speed and speed > 0 then
-            return {
-                Speed = speed,
-                RunAccel = tonumber(BaseStatsModule.RunAccel) or 1,
-                RunDeaccel = tonumber(BaseStatsModule.RunDeaccel) or 700,
-                SprintAcceleration = tonumber(BaseStatsModule.SprintAcceleration) or 1,
-            }
+        local value = tonumber(BaseStatsModule.Speed)
+        if value and value > 0 then
+            moveBaseSpeed = value
+            return moveBaseSpeed
+        end
+    end
+    local stats = getMoveStatsFromCharacter()
+    if stats then
+        local value = tonumber(rawget(stats, "Speed")) or 0
+        if value > 0 then
+            moveBaseSpeed = value
+            return moveBaseSpeed
         end
     end
     return nil
 end
 
 local function applyMoveStats()
+    local mult = speedMultiplier
+    if mult <= 1 and not speedApplied then
+        return
+    end
+    local base = resolveMoveBaseSpeed()
+    if not base or base <= 0 then
+        return
+    end
+    local target = base * mult
+    if target < 1 then
+        return
+    end
     for _, stats in ipairs(collectMoveStatsTables()) do
         if isUsableMoveStats(stats) then
             pcall(function()
-                local liveBaseSpeed = rawget(stats, "BaseSpeed")
-                if type(liveBaseSpeed) == "number" and liveBaseSpeed ~= DEFAULT_BASE_SPEED then
-                    stats.BaseSpeed = DEFAULT_BASE_SPEED
-                end
-                local base = getDefaultMoveStatsBase()
-                if base == nil then
-                    base = moveStatsBase[stats]
-                    if base == nil then
-                        local liveSpeed = tonumber(rawget(stats, "Speed")) or 0
-                        local chosenSpeed = DEFAULT_BASE_SPEED
-                        if liveSpeed > 0 and liveSpeed ~= currentSpeed then
-                            chosenSpeed = liveSpeed
-                        end
-                        base = {
-                            Speed = chosenSpeed,
-                            RunAccel = tonumber(rawget(stats, "RunAccel")) or 0,
-                            RunDeaccel = tonumber(rawget(stats, "RunDeaccel")) or 0,
-                            SprintAcceleration = tonumber(rawget(stats, "SprintAcceleration")) or 0,
-                        }
-                        moveStatsBase[stats] = base
-                    end
-                end
-                if base and base.Speed > 0 and currentSpeed > 0 then
-                    local factor = currentSpeed / base.Speed
-                    setStatIfChanged(stats, "Speed", currentSpeed)
-                    if base.RunAccel > 0 then
-                        setStatIfChanged(stats, "RunAccel", base.RunAccel * factor)
-                    end
-                    if base.RunDeaccel > 0 then
-                        setStatIfChanged(stats, "RunDeaccel", base.RunDeaccel * factor)
-                    end
-                    if base.SprintAcceleration > 0 then
-                        setStatIfChanged(stats, "SprintAcceleration", base.SprintAcceleration * factor)
-                    end
-                end
+                setStatIfChanged(stats, "Speed", target)
             end)
         end
     end
-end
-
-local function getMovementInput(data)
-    if not data then
-        return nil
-    end
-    local get = data.Get
-    if type(get) ~= "function" then
-        return nil
-    end
-    local ok, input = pcall(get, data, "MoveDirection")
-    if ok then
-        return input
-    end
-    return nil
-end
-
-local function isCrouching(data)
-    local character = player.Character
-    if character and type(character.GetAttribute) == "function" then
-        local ok, crouching = pcall(character.GetAttribute, character, "Crouching")
-        if ok and crouching == true then
-            return true
-        end
-        local stateOk, stateValue = pcall(character.GetAttribute, character, "State")
-        if stateOk and type(stateValue) == "string" then
-            if string.find(stateValue, "Crouch") ~= nil or string.find(stateValue, "Slide") ~= nil then
-                return true
-            end
-        end
-    end
-    if data then
-        local get = data.Get
-        if type(get) == "function" then
-            local ok, crouching = pcall(get, data, "Crouching")
-            if ok and crouching == true then
-                return true
-            end
-            local stateOk, stateValue = pcall(get, data, "State")
-            if stateOk and type(stateValue) == "string" then
-                if string.find(stateValue, "Crouch") ~= nil or string.find(stateValue, "Slide") ~= nil then
-                    return true
-                end
-            end
-        end
-    end
-    local container = getGamePlayersContainer()
-    local model = container and container:FindFirstChild(player.Name)
-    if not model or type(model.GetAttribute) ~= "function" then
-        return false
-    end
-    local modelOk, modelState = pcall(model.GetAttribute, model, "State")
-    if modelOk and type(modelState) == "string" then
-        if string.find(modelState, "Crouch") ~= nil or string.find(modelState, "Slide") ~= nil then
-            return true
-        end
-    end
-    return false
-end
-
-local crouchCached = false
-local lastCrouchCheck = 0
-local function isCrouchingCached(data)
-    local now = os.clock()
-    if now - lastCrouchCheck >= 0.5 then
-        lastCrouchCheck = now
-        crouchCached = isCrouching(data)
-    end
-    return crouchCached
-end
-
-local function adjustPlaneSpeed(mover, data)
-    if mover == nil then
-        return
-    end
-    local target = currentSpeed
-    if target <= 0 then
-        return
-    end
-    local baseMover = mover.BaseMover
-    if not baseMover then
-        return
-    end
-    local character = player.Character
-    if not character then
-        return
-    end
-    local humanoid = character:FindFirstChildOfClass("Humanoid")
-    if not humanoid or humanoid.Health <= 0 then
-        return
-    end
-    local input = getMovementInput(data)
-    if not input or input.Magnitude < 0.05 then
-        return
-    end
-    local planeVelocity = baseMover.PlaneVelocity
-    if typeof(planeVelocity) ~= "Vector2" then
-        return
-    end
-    local magnitude = planeVelocity.Magnitude
-    if magnitude <= 0 or magnitude >= target then
-        return
-    end
-
-    if not isCrouchingCached(data) and magnitude >= target * 0.5 then
-        return
-    end
-    baseMover.PlaneVelocity = planeVelocity.Unit * target
-end
-
-local function installMoveFunctionHooks()
-    if moveFunctionsHooked then
-        return
-    end
-
-    if currentSpeed <= 0 then
-        return
-    end
-    if not MoveFunctions then
-        MoveFunctions = findMoveFunctions()
-    end
-    if type(MoveFunctions) ~= "table" then
-        return
-    end
-    moveFunctionsHooked = true
-    for _, name in ipairs({ "Run", "Air" }) do
-        local original = MoveFunctions[name]
-        if type(original) == "function" then
-            MoveFunctions[name] = function(...)
-                local results = table.pack(original(...))
-                local data = select(3, ...)
-                pcall(adjustPlaneSpeed, results[1], data)
-                return table.unpack(results, 1, results.n)
-            end
-        end
-    end
+    speedApplied = mult > 1
 end
 
 local function getLiveMoveStats()
@@ -1223,6 +1037,7 @@ local function captureJumpBase()
     end
 end
 
+
 local function applyJumpState()
     local baseHeight = loadJumpBase()
     if not baseHeight then
@@ -1258,7 +1073,7 @@ local function setJumpLevel(value)
 end
 
 local function applySpeed(value)
-    currentSpeed = value
+    speedMultiplier = value
     pcall(applyMoveStats)
 end
 
@@ -1288,13 +1103,10 @@ local lastBaseStatsAttempt = 0
 task.spawn(function()
     lastBaseStatsAttempt = os.clock()
     BaseStatsModule = findBaseStats()
-    if BaseStatsModule then
-
-    else
+    if not BaseStatsModule then
         lastBaseStatsAttempt = 0
         captureJumpBase()
     end
-    pcall(installMoveFunctionHooks)
     pcall(applyMoveStats)
     pcall(applyJumpState)
     for _ = 1, 20 do
@@ -1315,7 +1127,6 @@ task.spawn(function()
                 BaseStatsModule = findBaseStats()
             end
         end
-        pcall(installMoveFunctionHooks)
         pcall(applyMoveStats)
         if jumpLevel > 1 or not jumpBaseApplied then
             pcall(applyJumpState)
@@ -1333,8 +1144,6 @@ end)
 player.CharacterAdded:Connect(function()
     cachedCharacterObject = nil
     cachedCharacterObjectAt = 0
-    crouchCached = false
-    lastCrouchCheck = 0
     task.delay(1, function()
         captureJumpBase()
         pcall(applyMoveStats)
@@ -2544,11 +2353,6 @@ helpSection:Paragraph({
     Desc = "按 Home 或 F3 键"
 })
 
-helpSection:Paragraph({
-    Title = "修复游戏 HUD（表情轮盘/道具菜单不显示）",
-    Desc = "功能页最下面的「修复」页"
-})
-
 local espSection = Tab:Section({
     Title = "ESP",
     IconName = "eye"
@@ -2604,11 +2408,11 @@ autoJumpToggleRef = moveSection:Toggle({
 })
 
 moveSection:Slider({
-    Title = "移动速度",
+    Title = "移动速度倍率",
     Value = {
         Min = 1,
-        Max = 10000,
-        Default = 2000,
+        Max = 10,
+        Default = 1,
     },
     Callback = function(value)
         applySpeed(value)
@@ -2642,7 +2446,6 @@ reviveSection:Toggle({
 
 reviveSection:Toggle({
     Title = "自动复活(兼容模式)",
-    Desc = "默认开：沿用老版找远端方式（最稳）；关掉后只发保守的重生远端",
     Value = true,
     Callback = function(state)
         EvadeNet.compat = state
@@ -2825,93 +2628,54 @@ musicSection:Button({
     end
 })
 
-do
-local function stopAllDangerousFeatures()
-    autoJumpEnabled = false
-    autoRevive = false
-    rescueEnabled = false
-    platformEnabled = false
-    itemFarmEnabled = false
-    boomboxEnabled = false
-    rescueSelfDowned = false
-
-    currentSpeed = 0
-    jumpLevel = 1
-    pcall(rescueReleaseKey)
-    pcall(function()
-        destroyPlatformPin()
-        destroyPlatform()
-    end)
-    pcall(function()
-        destroyRescueVelocity(true)
-    end)
-    pcall(function()
-        if bbCurrent then
-            bbDestroy()
-        end
-    end)
-
-    pcall(function()
-        local pg = player:FindFirstChildOfClass("PlayerGui")
-        local gameGui = pg and pg:FindFirstChild("Game")
-        local hud = gameGui and gameGui:FindFirstChild("HUD")
-        local interactors = hud and hud:FindFirstChild("Interactors")
-        local popups = interactors and interactors:FindFirstChild("Popups")
-        if popups then
-            for _, child in ipairs(popups:GetChildren()) do
-                pcall(function()
-                    child.Visible = false
-                end)
+task.spawn(function()
+    local brokenTicks = 0
+    while true do
+        task.wait(1)
+        local ok = pcall(function()
+            local pg = player:FindFirstChildOfClass("PlayerGui")
+            if not pg then
+                brokenTicks = 0
+                return
             end
-        end
-    end)
-    local char = player.Character
-    if char then
-        local humanoid = char:FindFirstChildOfClass("Humanoid")
-        if humanoid then
-            pcall(function()
-                humanoid.WalkSpeed = 16
-            end)
-        end
-    end
-end
-
-local function repairGameHud()
-    stopAllDangerousFeatures()
-    local fired = EvadeNet.FireRespawnCompat()
-    if fired then
-        pcall(function()
-            WindUI:Notify({
-                Title = "修复 HUD",
-                Content = "已请求游戏重生，角色重生后表情/道具菜单应恢复",
-                Duration = 5,
-            })
+            local gameGui = pg:FindFirstChild("Game")
+            local shared = pg:FindFirstChild("Shared")
+            if not (gameGui and shared) then
+                brokenTicks = 0
+                return
+            end
+            local char = player.Character
+            local humanoid = char and char:FindFirstChildOfClass("Humanoid")
+            local downed = char and char:GetAttribute("Downed")
+            local healthy = humanoid == nil or humanoid.Health > 0
+            if (not gameGui.Enabled) and (not shared.Enabled) and healthy and not downed then
+                brokenTicks = brokenTicks + 1
+                if brokenTicks >= 2 then
+                    gameGui.Enabled = true
+                    shared.Enabled = true
+                    brokenTicks = 0
+                    local hud = gameGui:FindFirstChild("HUD")
+                    local interactors = hud and hud:FindFirstChild("Interactors")
+                    local popups = interactors and interactors:FindFirstChild("Popups")
+                    if popups then
+                        for _, child in ipairs(popups:GetChildren()) do
+                            if child.Visible then
+                                pcall(function()
+                                    child.Visible = false
+                                end)
+                            end
+                        end
+                    end
+                end
+            else
+                brokenTicks = 0
+            end
         end)
-    else
-        pcall(function()
-            WindUI:Notify({
-                Title = "修复 HUD",
-                Content = "没找到游戏的重生远端，只能重进服务器",
-                Duration = 5,
-            })
-        end)
+        if not ok then
+            brokenTicks = 0
+        end
     end
-end
-
-local repairSection = Tab:Section({
-    Title = "修复",
-    IconName = "wrench"
-})
-
-repairSection:Button({
-    Title = "退出异常状态并修复 HUD",
-    Desc = "关功能、清速度/平台/按键、关掉卡住的弹窗，再请求游戏重生一次",
-    Callback = function()
-        pcall(repairGameHud)
-    end
-})
-
-end
+end)
 
 local UI_HIDE_KEYS = { Enum.KeyCode.Insert, Enum.KeyCode.F2 }
 local AUTO_JUMP_KEYS = { Enum.KeyCode.Home, Enum.KeyCode.F3 }
